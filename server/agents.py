@@ -15,7 +15,14 @@ Agent roles:
 
 import random
 import json
+import sys
+import os
 from typing import List, Dict, Any, Optional
+
+# Ensure the project root is in sys.path for absolute imports
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 
 
 # ═══════════════════════════════════════════════════════
@@ -167,47 +174,44 @@ def expenditure_agent(invoices: list, cash: float) -> Dict[str, Any]:
     }
 
 
-def revenue_agent(receivables: list, cash: float, day: int) -> Dict[str, Any]:
+def revenue_agent(receivables: list, invoices: list, cash: float, day: int) -> Dict[str, Any]:
     """
-    Revenue Agent: Analyzes expected inflows and projects cash position.
+    Revenue Agent: Analyzes expected inflows and projects cash position relative to debt.
     """
-    if not receivables:
+    if not receivables and not invoices:
         return {
             "total_expected_inflow": 0.0,
             "reliable_inflows": [],
             "at_risk_inflows": [],
             "cash_projection_3day": cash,
-            "recommendation": "cash_critical",
-            "reasoning": "No expected receivables. Cash position depends entirely on current balance.",
+            "recommendation": "cash_sufficient",
+            "reasoning": "No activity detected. Cash position is stable.",
         }
 
-    total = sum(r.amount * r.probability for r in receivables)
+    total_inflow = sum(r.amount * r.probability for r in receivables)
     reliable = [r.id for r in receivables if r.probability >= 0.85]
-    at_risk = [r.id for r in receivables if r.probability < 0.8]
-
-    # 3-day projection: sum inflows due within 3 days weighted by probability
-    inflow_3d = sum(
-        r.amount * r.probability
-        for r in receivables
-        if r.expected_in <= 3
-    )
-    projection = cash + inflow_3d
-
-    if projection > 500000:
-        rec = "cash_sufficient"
-        reasoning = f"3-day projection: {projection:.0f}. Inflows look healthy."
-    elif projection > 200000:
-        rec = "cash_tight"
-        reasoning = f"3-day projection: {projection:.0f}. Cash is tight, conserve spending."
-    else:
+    
+    # 3-day projection: Expected Inflow vs Mandatory Outflow
+    inflow_3d = sum(r.amount * r.probability for r in receivables if r.expected_in <= 3)
+    outflow_3d = sum(i.amount for i in invoices if i.due_in <= 3 and i.status != "paid")
+    
+    net_position = (cash + inflow_3d) - outflow_3d
+    
+    if net_position < 0:
         rec = "cash_critical"
-        reasoning = f"3-day projection: {projection:.0f}. Critical — consider drawing credit."
+        reasoning = f"CRITICAL: Expected deficit of ₹{abs(net_position):.0f} in 3 days. Immediate credit or deferral required."
+    elif net_position < cash * 0.5:
+        rec = "cash_tight"
+        reasoning = f"TIGHT: Inflows only cover {((cash+inflow_3d)/outflow_3d*100 if outflow_3d > 0 else 100):.0f}% of upcoming debt. Conserve cash."
+    else:
+        rec = "cash_sufficient"
+        reasoning = f"SUFFICIENT: Net 3-day position of ₹{net_position:.0f} is healthy."
 
     return {
-        "total_expected_inflow": round(total, 2),
+        "total_expected_inflow": round(total_inflow, 2),
         "reliable_inflows": reliable,
-        "at_risk_inflows": at_risk,
-        "cash_projection_3day": round(projection, 2),
+        "outflow_3d_target": round(outflow_3d, 2),
+        "net_3day_position": round(net_position, 2),
         "recommendation": rec,
         "reasoning": reasoning,
     }

@@ -12,18 +12,15 @@ from openenv.core.env_server.http_server import create_app
 
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-try:
-    from models import CashflowmanagerAction, CashflowmanagerObservation
-    from server.cashflowmanager_environment import CashflowmanagerEnvironment
-except ImportError:
-    try:
-        from cashflowmanager.models import CashflowmanagerAction, CashflowmanagerObservation
-        from cashflowmanager.server.cashflowmanager_environment import CashflowmanagerEnvironment
-    except ImportError:
-        from ..models import CashflowmanagerAction, CashflowmanagerObservation
-        from .cashflowmanager_environment import CashflowmanagerEnvironment
+# Ensure the project root is in sys.path for absolute imports
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from models import CashflowmanagerAction, CashflowmanagerObservation
+from server.cashflowmanager_environment import CashflowmanagerEnvironment
+from server.client import groq_policy, clear_action_cache
 
 
 app: FastAPI = create_app(
@@ -33,14 +30,6 @@ app: FastAPI = create_app(
     env_name="cashflowmanager",
     max_concurrent_envs=1,
 )
-
-try:
-    from server.client import groq_policy, clear_action_cache
-except ImportError:
-    try:
-        from cashflowmanager.server.client import groq_policy, clear_action_cache
-    except ImportError:
-        from .client import groq_policy, clear_action_cache
 
 
 # Global state for the interactive UI

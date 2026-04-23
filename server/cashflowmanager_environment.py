@@ -24,40 +24,24 @@ from typing import List, Dict, Any, Optional
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-try:
-    from models import (
-        CashflowmanagerAction, CashflowmanagerObservation,
-        Invoice, Receivable, VendorProfile, NegotiationResult, Transition
-    )
-    from server.world_model import WorldModel
-    from server.data_generator import generate_scenario
-    from server.agents import (
-        expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
-    )
-    from server.reward import compute_reward
-except ImportError:
-    try:
-        from cashflowmanager.models import (
-            CashflowmanagerAction, CashflowmanagerObservation,
-            Invoice, Receivable, VendorProfile, NegotiationResult, Transition
-        )
-        from cashflowmanager.server.world_model import WorldModel
-        from cashflowmanager.server.data_generator import generate_scenario
-        from cashflowmanager.server.agents import (
-            expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
-        )
-        from cashflowmanager.server.reward import compute_reward
-    except ImportError:
-        from ..models import (
-            CashflowmanagerAction, CashflowmanagerObservation,
-            Invoice, Receivable, VendorProfile, NegotiationResult, Transition
-        )
-        from .world_model import WorldModel
-        from .data_generator import generate_scenario
-        from .agents import (
-            expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
-        )
-        from .reward import compute_reward
+import sys
+import os
+
+# Ensure the project root is in sys.path for absolute imports
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from models import (
+    CashflowmanagerAction, CashflowmanagerObservation,
+    Invoice, Receivable, VendorProfile, NegotiationResult, Transition
+)
+from server.world_model import WorldModel
+from server.data_generator import generate_scenario
+from server.agents import (
+    expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
+)
+from server.reward import compute_reward
 
 
 MAX_DAYS = 10
@@ -371,8 +355,8 @@ class CashflowmanagerEnvironment(Environment):
             [inv for inv in self.invoices if inv.status != "paid"],
             self.cash
         )
-        rev_memo = revenue_agent(self.receivables, self.cash, self.day)
-        risk_memo = risk_agent_icl(self.cash, self.credit_used, self.credit_limit, world_hints)
+        rev_memo = revenue_agent(self.receivables, self.invoices, self.cash, self.day)
+        risk_memo = risk_agent(self.cash, self.credit_used, self.credit_limit, world_hints)
 
         advisor_memos = {
             "Expenditure": exp_memo,

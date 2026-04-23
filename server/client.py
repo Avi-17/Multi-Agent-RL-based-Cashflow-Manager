@@ -1,16 +1,16 @@
 import os
 import json
+import random
 import sys
 import torch
 from dotenv import load_dotenv
 
-try:
-    from models import CashflowmanagerAction
-except ImportError:
-    try:
-        from cashflowmanager.models import CashflowmanagerAction
-    except ImportError:
-        from ..models import CashflowmanagerAction
+# Ensure the project root is in sys.path for absolute imports
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from models import CashflowmanagerAction
 
 try:
     from openai import OpenAI
@@ -190,3 +190,47 @@ Choose ONE action for the most critical invoice. Respond with JSON only:
     
     # Rule-based fallback
     return CashflowmanagerAction(type="defer", invoice_id=invoices[0].id, memo="Fallback defer")
+
+def _cfo_rule_decide(obs, invoices):
+    """
+    Expert Rule-Based CFO for SFT data generation.
+    Prioritizes high-penalty debt and maintains cash buffers.
+    """
+    if not invoices:
+        if obs.cash < 200000 and obs.credit_used < obs.credit_limit:
+            return CashflowmanagerAction(type="credit", amount=500000.0, memo="Low cash: Drawing credit buffer")
+        return CashflowmanagerAction(type="defer", memo="No outstanding liabilities")
+
+    # 1. Check for immediate crises (Debt due today or overdue with high interest)
+    critical_invoices = sorted(
+        [i for i in invoices if i.due_in <= 1 or i.status == "overdue"],
+        key=lambda x: (x.late_fee, x.interest),
+        reverse=True
+    )
+
+    if critical_invoices:
+        inv = critical_invoices[0]
+        if obs.cash >= inv.amount:
+            return CashflowmanagerAction(type="pay", invoice_id=inv.id, amount=inv.amount, memo=f"Paying critical invoice {inv.id} to avoid penalties")
+        elif obs.cash + (obs.credit_limit - obs.credit_used) >= inv.amount:
+            # Draw credit if needed to pay critical debt
+            needed = inv.amount - obs.cash
+            return CashflowmanagerAction(type="credit", amount=max(needed, 500000.0), memo="Drawing credit to pay urgent debt")
+        else:
+            # Can't pay full, try to negotiate or partial
+            return CashflowmanagerAction(type="negotiate", invoice_id=inv.id, memo="Insufficient cash for critical debt: Negotiating extension")
+
+    # 2. Negotiate high-amount future debt to improve terms early
+    large_future_debt = [i for i in invoices if i.amount > 1000000 and i.due_in > 2]
+    if large_future_debt:
+        inv = random.choice(large_future_debt)
+        return CashflowmanagerAction(type="negotiate", invoice_id=inv.id, memo=f"Negotiating large future payment {inv.id} early")
+
+    # 3. Pay smallest invoices to keep vendor count low
+    small_invoices = sorted(invoices, key=lambda x: x.amount)
+    if obs.cash >= small_invoices[0].amount:
+        inv = small_invoices[0]
+        return CashflowmanagerAction(type="pay", invoice_id=inv.id, amount=inv.amount, memo=f"Paying small invoice {inv.id} to simplify ledger")
+
+    return CashflowmanagerAction(type="defer", memo="Preserving cash for upcoming liabilities")
+
