@@ -101,14 +101,15 @@ class CashflowmanagerEnvironment(Environment):
     # ═══════════════════════════════════════════════════
     # STEP 1: RESET — Generate cash, invoices, revenue
     # ═══════════════════════════════════════════════════
-    def reset(self, difficulty=None, seed=None) -> CashflowmanagerObservation:
+    def reset(self, difficulty="medium", seed=None) -> CashflowmanagerObservation:
         if difficulty:
             self.difficulty = difficulty
+        print(f"--- RESETTING ENVIRONMENT | DIFFICULTY: {self.difficulty} | SEED: {seed} ---")
         if seed is not None:
             random.seed(seed)
 
-        # Generate synthetic scenario
-        scenario = generate_scenario()
+        # Generate synthetic scenario based on difficulty
+        scenario = generate_scenario(difficulty=self.difficulty)
 
         self.day = 1
         self.cash = scenario["company"]["starting_cash"]

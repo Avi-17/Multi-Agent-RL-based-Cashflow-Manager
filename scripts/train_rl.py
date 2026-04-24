@@ -20,6 +20,7 @@ Usage:
 import os
 import sys
 import json
+import inspect
 import random
 import torch
 from datasets import Dataset
@@ -46,7 +47,6 @@ def load_transitions(path):
     with open(path, "r") as f:
         for line in f:
             t = json.loads(line.strip())
-            # Build prompt from state + advisor memos
             advisor_str = "\n".join([
                 f"[{k}]: {json.dumps(v) if isinstance(v, dict) else v}"
                 for k, v in t.get("advisor_memos", {}).items()
@@ -78,32 +78,27 @@ def reward_function(completions, prompts_data):
         score = 0.0
         text = completion if isinstance(completion, str) else completion[0]
 
-        # Check valid JSON
         try:
             parsed = json.loads(text)
             score += 1.0
 
-            # Check action type
             if parsed.get("type") in ["pay", "defer", "partial", "negotiate", "credit"]:
                 score += 2.0
 
-            # Check reasoning exists
             if parsed.get("reasoning") and len(parsed["reasoning"]) > 10:
                 score += 1.0
 
-            # Bonus if matches expert
             if i < len(prompts_data):
                 expert = prompts_data[i]["action"]
                 if parsed.get("type") == expert.get("type"):
                     score += 3.0
 
         except (json.JSONDecodeError, TypeError):
-            score -= 1.0  # Penalty for invalid JSON
+            score -= 1.0
 
-        # Add environment reward signal (scaled)
         if i < len(prompts_data):
             env_reward = prompts_data[i]["reward"]
-            score += env_reward * 0.01  # Scale down env reward
+            score += env_reward * 0.01
 
         rewards.append(score)
 
@@ -128,7 +123,7 @@ def main():
         dtype=None,
         load_in_4bit=True,
     )
-    
+
     tokenizer = get_chat_template(
         tokenizer,
         chat_template="gemma",
@@ -156,34 +151,33 @@ def main():
     raw_data = load_transitions(TRANSITIONS_PATH)
     print(f"Loaded {len(raw_data)} transitions")
 
-    # Build dataset of prompts
     dataset = Dataset.from_list([{"prompt": d["prompt"]} for d in raw_data])
 
     # ─── GRPO Training ───
     from trl import GRPOConfig, GRPOTrainer
 
-    # Monkeypatch for Unsloth / Transformers >= 4.45 compatibility bug
-    if not hasattr(GRPOConfig, "push_to_hub_token"):
-        GRPOConfig.push_to_hub_token = None
-    if not hasattr(GRPOConfig, "hub_token"):
-        GRPOConfig.hub_token = None
+    # FIX: removed broken monkeypatch (setting class attributes on GRPOConfig
+    # doesn't prevent them being rejected as kwargs by __init__).
+    # Instead, build the config dict and strip any keys the installed
+    # version of GRPOConfig doesn't accept — version-safe across all TRL releases.
+    _grpo_fields = set(inspect.signature(GRPOConfig.__init__).parameters.keys())
+    _grpo_kwargs = {k: v for k, v in {
+        "output_dir":                    "outputs/cfo_rl",
+        "num_generations":               NUM_GENERATIONS,
+        "max_completion_length":         256,
+        "max_prompt_length":             MAX_SEQ_LENGTH - 256,
+        "per_device_train_batch_size":   BATCH_SIZE,
+        "gradient_accumulation_steps":   2,
+        "max_steps":                     MAX_STEPS,
+        "learning_rate":                 LEARNING_RATE,
+        "logging_steps":                 5,
+        "report_to":                     "none",
+        "seed":                          42,
+        "push_to_hub":                   False,
+    }.items() if k in _grpo_fields}
 
-    grpo_config = GRPOConfig(
-        output_dir=f"outputs/cfo_rl",
-        num_generations=NUM_GENERATIONS,
-        max_completion_length=256,
-        max_prompt_length=MAX_SEQ_LENGTH - 256,
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=2,
-        max_steps=MAX_STEPS,
-        learning_rate=LEARNING_RATE,
-        logging_steps=5,
-        report_to="none",
-        seed=42,
-        push_to_hub=False, # Fix for token error
-    )
+    grpo_config = GRPOConfig(**_grpo_kwargs)
 
-    # Custom reward wrapper
     def compute_rewards(completions, **kwargs):
         """GRPO reward function — scores each completion."""
         texts = []
@@ -206,8 +200,8 @@ def main():
     )
 
     print("Starting GRPO training...")
-    stats = trainer.train()
-    print(f"Training complete!")
+    trainer.train()
+    print("Training complete!")
 
     # ─── Save ───
     save_path = f"{OUTPUT_DIR}/cfo_rl_lora"

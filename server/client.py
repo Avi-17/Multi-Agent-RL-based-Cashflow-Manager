@@ -167,7 +167,7 @@ def _cfo_llm_decide(obs, invoices):
     advisor_str = "\n".join([f"[{k}]: {v}" for k, v in obs.advisor_messages.items()])
     inv_str = "\n".join([f"- {inv.id}: ${inv.amount:.0f} due {inv.due_in}d" for inv in invoices[:5]])
     events_str = "\n".join(obs.world_events) if obs.world_events else "None"
-    neg_str = f"\nLast negotiation: {obs.negotiation_result.decision}" if obs.negotiation_result else ""
+    neg_str = f"\nLast negotiation: {obs.negotiation_result.vendor_message}" if obs.negotiation_result else ""
 
     prompt = f"""DAY: {obs.day} | CASH: ₹{obs.cash:.0f} | CREDIT: ₹{obs.credit_used:.0f}/{obs.credit_limit:.0f}
 ADVISOR MEMOS:

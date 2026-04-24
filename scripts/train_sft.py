@@ -17,13 +17,14 @@ Usage in Kaggle notebook:
 
 import os
 import json
+import inspect
 import torch
 from datasets import Dataset
 
 # ═══════════════════════════════════════════════════════
 # CONFIG — Change these for your setup
 # ═══════════════════════════════════════════════════════
-MODEL_NAME = "unsloth/Llama-3.2-1B-Instruct-bnb-4bit"  # Small model for fast training
+MODEL_NAME = "unsloth/gemma-2-2b-it-bnb-4bit"  # Open access, fits on T4
 MAX_SEQ_LENGTH = 2048
 LORA_R = 16
 LORA_ALPHA = 16
@@ -47,22 +48,6 @@ def load_data(path):
     return samples
 
 
-def format_chat(sample):
-    """Convert chat messages to a single training string."""
-    messages = sample["messages"]
-    text = ""
-    for msg in messages:
-        role = msg["role"]
-        content = msg["content"]
-        if role == "system":
-            text += f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{content}<|eot_id|>"
-        elif role == "user":
-            text += f"<|start_header_id|>user<|end_header_id|>\n{content}<|eot_id|>"
-        elif role == "assistant":
-            text += f"<|start_header_id|>assistant<|end_header_id|>\n{content}<|eot_id|>"
-    return {"text": text}
-
-
 def main():
     print(f"Training agent: {AGENT_TO_TRAIN}")
     print(f"Data path: {DATA_PATH}")
@@ -76,12 +61,19 @@ def main():
 
     # ─── Load Unsloth ───
     from unsloth import FastLanguageModel
+    from unsloth.chat_templates import get_chat_template
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
-        dtype=None,  # Auto-detect
+        dtype=None,
         load_in_4bit=True,
+    )
+
+    # ─── Setup Gemma-2 Chat Template ───
+    tokenizer = get_chat_template(
+        tokenizer,
+        chat_template="gemma",
     )
 
     # ─── Add LoRA Adapters ───
@@ -102,35 +94,51 @@ def main():
     print(f"Loaded {len(raw_data)} training samples")
 
     dataset = Dataset.from_list(raw_data)
-    dataset = dataset.map(format_chat, remove_columns=dataset.column_names)
+
+    def apply_template(examples):
+        texts = []
+        for messages in examples["messages"]:
+            texts.append(tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            ))
+        return {"text": texts}
+
+    dataset = dataset.map(apply_template, batched=True, remove_columns=dataset.column_names)
 
     # ─── Train ───
-    from trl import SFTTrainer
-    from transformers import TrainingArguments
+    from trl import SFTTrainer, SFTConfig
+
+    # FIX: build config dict and strip any keys SFTConfig doesn't accept
+    # so version mismatches with push_to_hub_token / hub_token never crash.
+    _sft_fields = set(inspect.signature(SFTConfig.__init__).parameters.keys())
+    _sft_kwargs = {k: v for k, v in {
+        "output_dir":                    f"outputs/{AGENT_TO_TRAIN}",
+        "per_device_train_batch_size":   BATCH_SIZE,
+        "gradient_accumulation_steps":   GRAD_ACCUM,
+        "warmup_steps":                  5,
+        "max_steps":                     MAX_STEPS,
+        "learning_rate":                 LEARNING_RATE,
+        "fp16":                          not torch.cuda.is_bf16_supported(),
+        "bf16":                          torch.cuda.is_bf16_supported(),
+        "logging_steps":                 5,
+        "optim":                         "adamw_8bit",
+        "weight_decay":                  0.01,
+        "lr_scheduler_type":             "linear",
+        "seed":                          42,
+        "report_to":                     "none",
+        "push_to_hub":                   False,
+        "dataset_text_field":            "text",
+        "max_seq_length":                MAX_SEQ_LENGTH,
+        "dataset_num_proc":              2,
+    }.items() if k in _sft_fields}
+
+    sft_config = SFTConfig(**_sft_kwargs)
 
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset,
-        dataset_text_field="text",
-        max_seq_length=MAX_SEQ_LENGTH,
-        dataset_num_proc=2,
-        args=TrainingArguments(
-            per_device_train_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRAD_ACCUM,
-            warmup_steps=5,
-            max_steps=MAX_STEPS,
-            learning_rate=LEARNING_RATE,
-            fp16=not torch.cuda.is_bf16_supported(),
-            bf16=torch.cuda.is_bf16_supported(),
-            logging_steps=5,
-            optim="adamw_8bit",
-            weight_decay=0.01,
-            lr_scheduler_type="linear",
-            seed=42,
-            output_dir=f"outputs/{AGENT_TO_TRAIN}",
-            report_to="none",
-        ),
+        args=sft_config,
     )
 
     print("Starting training...")
