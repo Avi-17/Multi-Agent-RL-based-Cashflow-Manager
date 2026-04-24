@@ -1,7 +1,15 @@
 import json
 import random
+from typing import List, Dict, Any
 from uuid import uuid4
-from typing import List, Dict
+
+try:
+    from models import Invoice, Receivable, VendorProfile
+except ImportError:
+    try:
+        from cashflowmanager.models import Invoice, Receivable, VendorProfile
+    except ImportError:
+        from ..models import Invoice, Receivable, VendorProfile
 
 def generate_company_profile():
     sectors = ["Tech", "Manufacturing", "Retail", "Services"]
@@ -13,45 +21,48 @@ def generate_company_profile():
         "revenue_target": 2000000
     }
 
-def generate_vendors(n=5):
+def generate_vendors(n: int = 5) -> List[Dict[str, Any]]:
     vendors = []
     names = ["FastLogistics", "GlobalParts", "EnergyCo", "SecureCloud", "ProConsulting"]
     for i in range(min(n, len(names))):
-        vendors.append({
-            "id": f"v-{i}",
-            "name": names[i],
-            "trust_score": random.uniform(0.6, 0.9),
-            "negotiation_flexibility": random.uniform(0.3, 0.7),
-            "late_fee_waiver_prob": random.uniform(0.1, 0.4)
-        })
+        v = VendorProfile(
+            id=f"v-{i}",
+            name=names[i],
+            trust_score=random.uniform(0.6, 0.9),
+            negotiation_flexibility=random.uniform(0.3, 0.7),
+            late_fee_waiver_prob=random.uniform(0.1, 0.4)
+        )
+        vendors.append(v.model_dump())
     return vendors
 
-def generate_invoices(vendors, n=10):
+def generate_invoices(vendors: List[Dict[str, Any]], n: int = 10) -> List[Dict[str, Any]]:
     invoices = []
     for _ in range(n):
         vendor = random.choice(vendors)
-        invoices.append({
-            "id": str(uuid4())[:8],
-            "vendor_id": vendor["id"],
-            "amount": random.uniform(50000, 300000),
-            "due_in": random.randint(1, 10),
-            "late_fee": random.uniform(5000, 20000),
-            "min_payment": random.uniform(10000, 50000),
-            "interest": random.uniform(0.01, 0.05),
-            "status": "unpaid"
-        })
+        inv = Invoice(
+            id=str(uuid4())[:8],
+            vendor_id=vendor["id"],
+            amount=random.uniform(50000, 300000),
+            due_in=random.randint(1, 10),
+            late_fee=random.uniform(5000, 20000),
+            min_payment=random.uniform(10000, 50000),
+            interest=random.uniform(0.01, 0.05),
+            status="unpaid"
+        )
+        invoices.append(inv.model_dump())
     return invoices
 
-def generate_receivables(n=5):
+def generate_receivables(n: int = 5) -> List[Dict[str, Any]]:
     receivables = []
     for i in range(n):
-        receivables.append({
-            "id": f"r-{i}",
-            "customer_id": f"c-{i}",
-            "amount": random.uniform(100000, 500000),
-            "expected_in": random.randint(2, 12),
-            "probability": random.uniform(0.7, 0.95)
-        })
+        rec = Receivable(
+            id=f"r-{i}",
+            customer_id=f"c-{i}",
+            amount=random.uniform(100000, 500000),
+            expected_in=random.randint(2, 12),
+            probability=random.uniform(0.7, 0.95)
+        )
+        receivables.append(rec.model_dump())
     return receivables
 
 def generate_scenario():
