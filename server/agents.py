@@ -254,7 +254,9 @@ def risk_agent(cash: float, total_debt: float, credit_used: float, credit_limit:
     if market_stress > 0.4:
         threats.append(f"Market Volatility (Level: {market_stress:.1f})")
     if risk_level_hint == "critical":
-        threats.append("Hidden Cyber/Fraud Threat Detected")
+        threats.append("Upcoming Hidden Financial Threat Detected")
+    elif risk_level_hint == "elevated":
+        threats.append("Unspecified Hidden Threats Detected")
 
     # Final Risk Assessment
     if any("Critical" in t or "Exhausted" in t for t in threats) or len(threats) >= 3:

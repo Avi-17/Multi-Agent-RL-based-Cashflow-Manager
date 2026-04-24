@@ -207,7 +207,7 @@ class WorldModel:
         upcoming_threats = 0
         for event in self.events:
             if not event.triggered and abs(event.day - day) <= 2:
-                if event.event_type in ("cash_shock", "fraud"):
+                if event.event_type in ("cash_shock", "fraud", "payment_delay", "revenue_miss"):
                     upcoming_threats += 1
 
         if upcoming_threats >= 2:
