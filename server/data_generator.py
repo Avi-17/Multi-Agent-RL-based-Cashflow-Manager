@@ -1,7 +1,15 @@
 import json
 import random
+from typing import List, Dict, Any
 from uuid import uuid4
-from typing import List, Dict
+
+try:
+    from models import Invoice, Receivable, VendorProfile
+except ImportError:
+    try:
+        from cashflowmanager.models import Invoice, Receivable, VendorProfile
+    except ImportError:
+        from ..models import Invoice, Receivable, VendorProfile
 
 def generate_company_profile(difficulty="medium"):
     starting_cash = 1000000
