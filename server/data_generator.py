@@ -11,12 +11,14 @@ except ImportError:
     except ImportError:
         from ..models import Invoice, Receivable, VendorProfile
 
-def generate_company_profile():
-    sectors = ["Tech", "Manufacturing", "Retail", "Services"]
+def generate_company_profile(difficulty="medium"):
+    starting_cash = 1000000
+    if difficulty == "easy": starting_cash = 1500000
+    elif difficulty == "hard": starting_cash = 500000
+    
     return {
         "name": f"Enterprise-{random.randint(100, 999)}",
-        "sector": random.choice(sectors),
-        "starting_cash": random.uniform(500000, 1500000),
+        "starting_cash": starting_cash,
         "credit_limit": 500000,
         "revenue_target": 2000000
     }
@@ -35,8 +37,27 @@ def generate_vendors(n: int = 5) -> List[Dict[str, Any]]:
         vendors.append(v.model_dump())
     return vendors
 
-def generate_invoices(vendors: List[Dict[str, Any]], n: int = 10) -> List[Dict[str, Any]]:
+def generate_vendors(n=5, difficulty="medium"):
+    vendors = []
+    names = ["FastLogistics", "GlobalParts", "EnergyCo", "SecureCloud", "ProConsulting"]
+    for i in range(min(n, len(names))):
+        base_trust = 0.7 if difficulty == "easy" else 0.5 if difficulty == "medium" else 0.3
+        vendors.append({
+            "id": f"v-{i}",
+            "name": names[i],
+            "trust_score": random.uniform(base_trust, base_trust + 0.2),
+            "negotiation_flexibility": random.uniform(0.2, 0.6)
+        })
+    return vendors
+
+def generate_invoices(vendors, difficulty="medium"):
+    # Easy: 5 invoices, Medium: 10, Hard: 15
+    n = 5 if difficulty == "easy" else 10 if difficulty == "medium" else 15
     invoices = []
+    # Hard mode has higher interest, late fees, and AMOUNTS
+    int_mult = 0.5 if difficulty == "easy" else 1.0 if difficulty == "medium" else 2.0
+    amt_mult = 0.7 if difficulty == "easy" else 1.0 if difficulty == "medium" else 1.5
+    
     for _ in range(n):
         vendor = random.choice(vendors)
         inv = Invoice(
@@ -52,8 +73,13 @@ def generate_invoices(vendors: List[Dict[str, Any]], n: int = 10) -> List[Dict[s
         invoices.append(inv.model_dump())
     return invoices
 
-def generate_receivables(n: int = 5) -> List[Dict[str, Any]]:
+
+def generate_receivables(difficulty="medium"):
+    # Easy: 7 receivables, Medium: 5, Hard: 3
+    n = 7 if difficulty == "easy" else 5 if difficulty == "medium" else 3
     receivables = []
+    # Hard mode has lower payment probability
+    prob_base = 0.85 if difficulty == "easy" else 0.75 if difficulty == "medium" else 0.55
     for i in range(n):
         rec = Receivable(
             id=f"r-{i}",
@@ -65,13 +91,13 @@ def generate_receivables(n: int = 5) -> List[Dict[str, Any]]:
         receivables.append(rec.model_dump())
     return receivables
 
-def generate_scenario():
-    vendors = generate_vendors()
+def generate_scenario(difficulty="medium"):
+    vendors = generate_vendors(difficulty=difficulty)
     return {
-        "company": generate_company_profile(),
+        "company": generate_company_profile(difficulty=difficulty),
         "vendors": vendors,
-        "initial_invoices": generate_invoices(vendors),
-        "initial_receivables": generate_receivables(),
+        "initial_invoices": generate_invoices(vendors, difficulty=difficulty),
+        "initial_receivables": generate_receivables(difficulty=difficulty),
         "hidden_events": [
             {"day": random.randint(3, 7), "type": "cash_shock", "amount": -random.uniform(100000, 300000), "desc": "Equipment Failure"},
             {"day": random.randint(5, 10), "type": "payment_delay", "target_id": "r-0", "delay": 3}

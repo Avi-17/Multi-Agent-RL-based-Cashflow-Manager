@@ -13,16 +13,17 @@ from typing import List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-import sys
-import os
-
-# Ensure the project root is in sys.path
-root_dir = os.path.dirname(os.path.abspath(__file__))
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
-
-from server.cashflowmanager_environment import CashflowmanagerEnvironment
-from server.client import groq_policy, clear_action_cache
+try:
+    from server.cashflowmanager_environment import CashflowmanagerEnvironment
+    from server.client import groq_policy, clear_action_cache
+except ImportError:
+    try:
+        from cashflowmanager.server.cashflowmanager_environment import CashflowmanagerEnvironment
+        from cashflowmanager.server.client import groq_policy, clear_action_cache
+    except ImportError:
+        print("[FATAL] Cannot import environment modules", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
 
 MODEL_NAME = os.getenv("MODEL_NAME") or "llama-3.1-8b-instant"
 BENCHMARK = "cashflowmanager"

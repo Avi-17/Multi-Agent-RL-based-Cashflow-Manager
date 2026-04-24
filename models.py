@@ -40,16 +40,15 @@ class VendorProfile(BaseModel):
     name: str
     trust_score: float         # 0.0 to 1.0
     negotiation_flexibility: float  # 0.0 to 1.0
-    late_fee_waiver_prob: float
 
 
 class NegotiationResult(BaseModel):
     """Outcome from the Vendor Agent when CFO chooses 'negotiate'."""
-    decision: str = "reject"       # accept, reject, counter
-    late_fee_waiver: bool = False
+    accepted: bool = False
+    success_probability: float = 0.0
+    vendor_message: str = ""
+    is_predatory: bool = False
     extension_days: int = 0
-    counter_terms: str = ""
-    reasoning: str = ""
 
 
 class CashflowmanagerAction(Action):

@@ -12,18 +12,27 @@ from openenv.core.env_server.http_server import create_app
 
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+print(f"DEBUG: Starting server from CWD: {os.getcwd()}")
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+print(f"DEBUG: Root dir added to path: {root_dir}")
+sys.path.insert(0, root_dir)
+print(f"DEBUG: sys.path[0]: {sys.path[0]}")
 
 try:
     from models import CashflowmanagerAction, CashflowmanagerObservation
     from server.cashflowmanager_environment import CashflowmanagerEnvironment
-except ImportError:
+    print("DEBUG: Successfully imported from root level")
+except ImportError as e:
+    print(f"DEBUG: Root import failed: {e}")
     try:
         from cashflowmanager.models import CashflowmanagerAction, CashflowmanagerObservation
         from cashflowmanager.server.cashflowmanager_environment import CashflowmanagerEnvironment
-    except ImportError:
+        print("DEBUG: Successfully imported from cashflowmanager package")
+    except ImportError as e2:
+        print(f"DEBUG: Package import failed: {e2}")
         from ..models import CashflowmanagerAction, CashflowmanagerObservation
         from .cashflowmanager_environment import CashflowmanagerEnvironment
+        print("DEBUG: Using relative imports")
 
 
 app: FastAPI = create_app(
@@ -33,6 +42,7 @@ app: FastAPI = create_app(
     env_name="cashflowmanager",
     max_concurrent_envs=1,
 )
+print("DEBUG: FastAPI App created successfully")
 
 try:
     from server.client import groq_policy, clear_action_cache
@@ -48,12 +58,12 @@ _env_instance = None
 _last_obs = None
 _history = []
 
-def get_env(seed=42):
+def get_env(seed=42, difficulty="medium"):
     global _env_instance, _last_obs, _history
     if _env_instance is None:
         _env_instance = CashflowmanagerEnvironment()
         clear_action_cache()
-        _last_obs = _env_instance.reset(seed=seed)
+        _last_obs = _env_instance.reset(seed=seed, difficulty=difficulty)
         _history = []
     return _env_instance, _last_obs
 
@@ -112,10 +122,10 @@ def ai_step():
     action = groq_policy(_last_obs, [])
     return process_step(action.type, action.invoice_id, action.amount, memo=action.memo)
 
-def reset_sim(seed):
+def reset_sim(seed, difficulty):
     global _env_instance, _last_obs, _history
     _env_instance = None
-    get_env(seed=int(seed))
+    get_env(seed=int(seed), difficulty=difficulty)
     return update_ui()
 
 def update_ui():
@@ -157,15 +167,15 @@ def build_ui():
         gr.Markdown("# 🏢 Cashflow Management Dashboard")
         
         with gr.Row():
-            # --- Column 1: Financial State & Control ---
+            seed_input = gr.Number(value=42, label="Sim Seed", precision=0, scale=1)
+            difficulty_input = gr.Dropdown(choices=["easy", "medium", "hard"], value="medium", label="Difficulty", scale=1)
+            reset_btn = gr.Button("🔄 Reset", variant="secondary", scale=1)
+            ai_btn = gr.Button("🤖 AI Next Step", variant="primary", scale=2)
+
+        with gr.Row():
+            # --- Left: Data View ---
             with gr.Column(scale=3):
                 status_md = gr.Markdown("### 💰 Financial Status")
-                
-                with gr.Row():
-                    seed_input = gr.Number(value=42, label="Sim Seed", precision=0)
-                    reset_btn = gr.Button("🔄 Reset", variant="secondary")
-                    ai_btn = gr.Button("🤖 AI Next Step", variant="primary")
-                
                 with gr.Tabs():
                     with gr.TabItem("📋 Active Invoices"):
                         invoice_display = gr.Code(label="Debts", language="markdown")
@@ -175,36 +185,33 @@ def build_ui():
                 with gr.Group():
                     gr.Markdown("#### 🕹️ Manual Action")
                     with gr.Row():
-                        target_inv = gr.Dropdown(label="Invoice ID", choices=[])
-                        pay_amount = gr.Number(label="Amount (₹)", value=0)
+                        target_inv = gr.Dropdown(label="Select Invoice", choices=[], scale=2)
+                        pay_amount = gr.Number(label="Amount (₹)", value=0, scale=1)
                     
                     with gr.Row():
                         pay_btn = gr.Button("Pay Full", variant="stop")
-                        partial_btn = gr.Button("Partial")
                         neg_btn = gr.Button("Negotiate", variant="primary")
                         credit_btn = gr.Button("Draw Credit")
-                        defer_btn = gr.Button("Defer Step", variant="secondary")
+                        defer_btn = gr.Button("Defer Step")
 
-            # --- Column 2: Agent Intel & World Logs ---
+            # --- Right: Intelligence ---
             with gr.Column(scale=2):
                 memo_md = gr.Markdown("#### 🤖 Advisor Intelligence")
-                world_md = gr.Markdown("#### 🌍 World Events & Shocks")
+                world_md = gr.Markdown("#### 🌍 World Events")
         
         gr.Markdown("---")
-        gr.Markdown("### 📜 Transaction & Decision Log")
         history_table = gr.Dataframe(
             headers=["Step", "Day", "Action", "Amount", "Cash", "Reward", "Reasoning", "Events"],
-            datatype=["str", "str", "str", "str", "str", "str", "str", "str"],
             interactive=False
         )
 
         # Event handlers
-        demo.load(reset_sim, inputs=[seed_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        reset_btn.click(reset_sim, inputs=[seed_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
+        demo.load(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
+        reset_btn.click(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
+        difficulty_input.change(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
         ai_btn.click(ai_step, outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
         
         pay_btn.click(lambda id, amt: process_step("pay", id, amt), inputs=[target_inv, pay_amount], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        partial_btn.click(lambda id, amt: process_step("partial", id, amt), inputs=[target_inv, pay_amount], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
         neg_btn.click(lambda id: process_step("negotiate", id), inputs=[target_inv], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
         credit_btn.click(lambda amt: process_step("credit", amount=amt), inputs=[pay_amount], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
         defer_btn.click(lambda: process_step("defer"), outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
@@ -216,7 +223,7 @@ app = gr.mount_gradio_app(app, gradio_app, path="/ui")
 
 def main():
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=7861)
 
 if __name__ == "__main__":
     main()
