@@ -27,7 +27,7 @@ from datasets import Dataset
 # ═══════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════
-MODEL_NAME = "unsloth/Llama-3.2-1B-Instruct-bnb-4bit"
+MODEL_NAME = "unsloth/gemma-2-2b-it-bnb-4bit"
 MAX_SEQ_LENGTH = 1024
 LORA_R = 16
 BATCH_SIZE = 4
@@ -51,13 +51,13 @@ def load_transitions(path):
                 f"[{k}]: {json.dumps(v) if isinstance(v, dict) else v}"
                 for k, v in t.get("advisor_memos", {}).items()
             ])
-            prompt = (
+            prompt_text = (
                 f"State: {t['state_summary']}\n"
                 f"Advisors:\n{advisor_str}\n"
                 f"Decide the best action (pay/defer/partial/negotiate/credit):"
             )
             prompts.append({
-                "prompt": prompt,
+                "prompt": [{"role": "user", "content": prompt_text}],
                 "reward": t["reward"],
                 "action": t["action"],
             })
@@ -120,12 +120,18 @@ def main():
 
     # ─── Load Model ───
     from unsloth import FastLanguageModel
+    from unsloth.chat_templates import get_chat_template
 
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
         dtype=None,
         load_in_4bit=True,
+    )
+    
+    tokenizer = get_chat_template(
+        tokenizer,
+        chat_template="gemma",
     )
 
     model = FastLanguageModel.get_peft_model(
@@ -156,6 +162,12 @@ def main():
     # ─── GRPO Training ───
     from trl import GRPOConfig, GRPOTrainer
 
+    # Monkeypatch for Unsloth / Transformers >= 4.45 compatibility bug
+    if not hasattr(GRPOConfig, "push_to_hub_token"):
+        GRPOConfig.push_to_hub_token = None
+    if not hasattr(GRPOConfig, "hub_token"):
+        GRPOConfig.hub_token = None
+
     grpo_config = GRPOConfig(
         output_dir=f"outputs/cfo_rl",
         num_generations=NUM_GENERATIONS,
@@ -168,6 +180,7 @@ def main():
         logging_steps=5,
         report_to="none",
         seed=42,
+        push_to_hub=False, # Fix for token error
     )
 
     # Custom reward wrapper

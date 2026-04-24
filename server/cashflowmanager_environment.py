@@ -24,24 +24,40 @@ from typing import List, Dict, Any, Optional
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
-import sys
-import os
-
-# Ensure the project root is in sys.path for absolute imports
-root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
-
-from models import (
-    CashflowmanagerAction, CashflowmanagerObservation,
-    Invoice, Receivable, VendorProfile, NegotiationResult, Transition
-)
-from server.world_model import WorldModel
-from server.data_generator import generate_scenario
-from server.agents import (
-    expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
-)
-from server.reward import compute_reward
+try:
+    from models import (
+        CashflowmanagerAction, CashflowmanagerObservation,
+        Invoice, Receivable, VendorProfile, NegotiationResult, Transition
+    )
+    from server.world_model import WorldModel
+    from server.data_generator import generate_scenario
+    from server.agents import (
+        expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
+    )
+    from server.reward import compute_reward
+except ImportError:
+    try:
+        from cashflowmanager.models import (
+            CashflowmanagerAction, CashflowmanagerObservation,
+            Invoice, Receivable, VendorProfile, NegotiationResult, Transition
+        )
+        from cashflowmanager.server.world_model import WorldModel
+        from cashflowmanager.server.data_generator import generate_scenario
+        from cashflowmanager.server.agents import (
+            expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
+        )
+        from cashflowmanager.server.reward import compute_reward
+    except ImportError:
+        from ..models import (
+            CashflowmanagerAction, CashflowmanagerObservation,
+            Invoice, Receivable, VendorProfile, NegotiationResult, Transition
+        )
+        from .world_model import WorldModel
+        from .data_generator import generate_scenario
+        from .agents import (
+            expenditure_agent, revenue_agent, risk_agent, risk_agent_icl, vendor_agent, format_memo
+        )
+        from .reward import compute_reward
 
 
 MAX_DAYS = 10
@@ -184,42 +200,41 @@ class CashflowmanagerEnvironment(Environment):
             if inv and inv.status != "paid":
                 vendor = self.vendors.get(inv.vendor_id)
                 if vendor:
-                    # STEP 6: Vendor Agent responds
-                    neg_result = vendor_agent(vendor, inv)
-                    self.last_negotiation = NegotiationResult(**neg_result)
+                    # STEP 6: Vendor Agent responds with mood awareness
+                    mood = self.world_model.vendor_mood.get(inv.vendor_id, 0.0)
+                    neg_result = vendor_agent(
+                        {"id": vendor.id, "name": vendor.name}, 
+                        inv, 
+                        vendor_mood=mood,
+                        trust_score=vendor.trust_score
+                    )
+                    
+                    self.last_negotiation = {
+                        "accepted": neg_result["accepted"],
+                        "message": neg_result["vendor_message"]
+                    }
 
-                    if neg_result["decision"] == "accept":
-                        if neg_result["late_fee_waiver"]:
-                            inv.late_fee = 0
+                    if neg_result["accepted"]:
                         inv.due_in += neg_result["extension_days"]
-                        
-                        # Execute Payment (Action D)
-                        pay_amount = action.amount if action.amount and action.amount > 0 else inv.min_payment
-                        available = self.cash + (self.credit_limit - self.credit_used)
-                        pay_amount = min(pay_amount, inv.amount, available)
-                        
+                        negotiation_success = True
+                        trust_change += 0.02
+                    else:
+                        trust_change -= 0.05  # Trust drops on rejection
+                    
+                    # Execute Payment (Good faith payment or forced payment)
+                    pay_amount = action.amount if action.amount and action.amount > 0 else 0.0
+                    available = self.cash + (self.credit_limit - self.credit_used)
+                    pay_amount = min(pay_amount, inv.amount, available)
+                    
+                    if pay_amount > 0:
                         inv.amount -= pay_amount
+                        self._update_cash(-pay_amount)
                         if inv.amount <= 0:
                             inv.amount = 0
                             inv.status = "paid"
                             paid += 1
                         else:
                             inv.status = "partial"
-                        self._update_cash(-pay_amount)
-                        
-                        trust_change -= 0.01
-                        negotiation_success = True
-                        
-                    elif neg_result["decision"] == "counter":
-                        # Counter Offer -> CFO Re-evaluates in next step (Action F)
-                        inv.due_in += neg_result["extension_days"]
-                        inv.status = "negotiating"
-                        trust_change -= 0.02
-                        
-                    else:
-                        # Reject -> Fallback Action (Action E: Forced defer and minor trust penalty)
-                        inv.status = "unpaid"
-                        trust_change -= 0.05
 
         elif action.type == "credit":
             draw_amount = action.amount if action.amount and action.amount > 0 else 100000.0
@@ -307,16 +322,20 @@ class CashflowmanagerEnvironment(Environment):
         if self.day > MAX_DAYS:
             self.done = True
 
+        # Check for bankruptcy before reward
+        if self.cash < -500000: # Threshold for total collapse
+            self.done = True
+
         # ── STEP 9: REWARD COMPUTATION ──
         reward = compute_reward(
             cash=self.cash,
             late_fee=late_fee_total,
             interest=interest_total,
             credit_used=self.credit_used,
+            credit_limit=self.credit_limit,
             paid=paid,
-            vendor_trust_change=trust_change,
-            shock_absorbed=shock_absorbed,
-            negotiation_success=negotiation_success,
+            is_bankrupt=self.done,
+            negotiation_success=negotiation_success
         )
 
         # ── STEPS 3-4: Advisors observe new state and produce memos ──
@@ -351,12 +370,29 @@ class CashflowmanagerEnvironment(Environment):
         """Steps 3-4: Each agent observes partial state and produces a memo."""
         world_hints = self.world_model.get_risk_hints(self.day)
 
+        # Run Revenue Agent first to get projection (now aware of market stress)
+        rev_memo = revenue_agent(
+            self.receivables, 
+            self.invoices, 
+            self.cash, 
+            self.day, 
+            market_stress=world_hints.get("market_stress", 0.0)
+        )
+        
+        # Pass net 3-day position to Expenditure Agent for smarter prioritisation
         exp_memo = expenditure_agent(
             [inv for inv in self.invoices if inv.status != "paid"],
-            self.cash
+            self.cash,
+            revenue_projection=rev_memo.get("net_3day_position", self.cash)
         )
-        rev_memo = revenue_agent(self.receivables, self.invoices, self.cash, self.day)
-        risk_memo = risk_agent(self.cash, self.credit_used, self.credit_limit, world_hints)
+        
+        risk_memo = risk_agent(
+            self.cash, 
+            exp_memo.get("total_outstanding", 0.0),
+            self.credit_used, 
+            self.credit_limit, 
+            world_hints
+        )
 
         advisor_memos = {
             "Expenditure": exp_memo,

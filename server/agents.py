@@ -15,14 +15,7 @@ Agent roles:
 
 import random
 import json
-import sys
-import os
 from typing import List, Dict, Any, Optional
-
-# Ensure the project root is in sys.path for absolute imports
-root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
 
 
 # ═══════════════════════════════════════════════════════
@@ -119,193 +112,215 @@ Rules:
 # (Deterministic logic that produces structured outputs)
 # ═══════════════════════════════════════════════════════
 
-def expenditure_agent(invoices: list, cash: float) -> Dict[str, Any]:
+def expenditure_agent(invoices: list, cash: float, revenue_projection: float = 0.0) -> Dict[str, Any]:
     """
-    Expenditure Agent: Analyzes invoices and produces a priority memo.
+    Expenditure Agent: Prioritizes debt based on financial impact (Interest + Fees).
     """
     if not invoices:
         return {
-            "priority_list": [],
-            "critical_invoices": [],
-            "recommended_action": "defer_all",
-            "reasoning": "No active invoices.",
-            "total_liability": 0.0,
+            "priority_invoices": [],
+            "total_debt": 0.0,
+            "recommendation": "conserve_cash",
+            "reasoning": "No outstanding invoices. Maintain liquidity."
         }
 
-    scored = []
+    scored_invoices = []
+    total_debt = 0.0
+    
     for inv in invoices:
-        if inv.status == "paid":
-            continue
-        urgency = 0
-        if inv.due_in <= 0:
-            urgency = 100 + abs(inv.due_in) * 10  # Overdue — highest priority
-        elif inv.due_in <= 2:
-            urgency = 70 + (3 - inv.due_in) * 10  # Urgent
-        elif inv.due_in <= 4:
-            urgency = 40
-        else:
-            urgency = 10
-        # Factor in interest rate and amount
-        urgency += inv.interest * 100
-        urgency += inv.amount / 500
-        scored.append((inv, urgency))
+        if inv.status == "paid": continue
+        
+        total_debt += inv.amount
+        # Penalty = Late Fee (if due in <=1 day) + daily interest
+        immediate_penalty = inv.late_fee if inv.due_in <= 1 else 0.0
+        daily_interest = (inv.amount * inv.interest) / 30
+        
+        pain_score = immediate_penalty + daily_interest
+        
+        scored_invoices.append({
+            "id": inv.id,
+            "amount": inv.amount,
+            "due_in": inv.due_in,
+            "pain_score": round(pain_score, 2),
+            "interest_rate": f"{inv.interest*100:.1f}%"
+        })
 
-    scored.sort(key=lambda x: -x[1])
-    priority_list = [s[0].id for s in scored]
-    critical = [s[0].id for s in scored if s[0].due_in <= 0]
-    total_liability = sum(inv.amount for inv, _ in scored)
-
-    if critical:
-        action = "pay_critical"
-        reasoning = f"{len(critical)} invoices are OVERDUE. Immediate payment required to stop late fee compounding."
-    elif total_liability > cash * 0.8:
-        action = "partial_payments"
-        reasoning = f"Total liability ({total_liability:.0f}) exceeds 80% of cash ({cash:.0f}). Recommend partial payments on most urgent."
+    # Sort by pain score (highest first)
+    scored_invoices.sort(key=lambda x: x["pain_score"], reverse=True)
+    top_priority = scored_invoices[0] if scored_invoices else None
+    
+    if not top_priority:
+        rec = "conserve_cash"
+        reasoning = "All debt handled."
+    elif top_priority["pain_score"] > 5000:
+        rec = "pay_immediately"
+        reasoning = f"Invoice {top_priority['id']} has a high penalty cost (₹{top_priority['pain_score']:.0f}). Pay immediately."
+    elif float(top_priority["interest_rate"].replace('%','')) > 15.0:
+        # Strategic Negotiation: Even if we have cash, negotiate with predatory vendors
+        rec = "negotiate_or_defer"
+        reasoning = f"Invoice {top_priority['id']} is from a predatory vendor ({top_priority['interest_rate']}). Strategically negotiate to delay this expensive debt."
+    elif (cash + revenue_projection) < (total_debt * 1.2):
+        rec = "negotiate_or_defer"
+        reasoning = f"Total debt (₹{total_debt:.0f}) is too high relative to liquidity. Negotiate for time."
     else:
-        action = "pay_critical"
-        reasoning = f"Cash is sufficient. Pay invoices in priority order."
+        rec = "pay_partial"
+        reasoning = "Cash position is healthy. Pay high-interest items."
 
     return {
-        "priority_list": priority_list,
-        "critical_invoices": critical,
-        "recommended_action": action,
-        "reasoning": reasoning,
-        "total_liability": round(total_liability, 2),
+        "priority_queue": scored_invoices[:3],
+        "total_outstanding": round(total_debt, 2),
+        "suggested_payment": top_priority["amount"] if top_priority else 0.0,
+        "recommendation": rec,
+        "reasoning": reasoning
     }
 
 
-def revenue_agent(receivables: list, invoices: list, cash: float, day: int) -> Dict[str, Any]:
+def revenue_agent(receivables: list, invoices: list, cash: float, day: int, market_stress: float = 0.0) -> Dict[str, Any]:
     """
-    Revenue Agent: Analyzes expected inflows and projects cash position relative to debt.
+    Revenue Agent: Projects liquidity while adjusting for economic stress.
     """
     if not receivables and not invoices:
         return {
             "total_expected_inflow": 0.0,
-            "reliable_inflows": [],
-            "at_risk_inflows": [],
-            "cash_projection_3day": cash,
+            "net_3day_position": cash,
             "recommendation": "cash_sufficient",
-            "reasoning": "No activity detected. Cash position is stable.",
+            "reasoning": "Stable state, no activity."
         }
 
-    total_inflow = sum(r.amount * r.probability for r in receivables)
-    reliable = [r.id for r in receivables if r.probability >= 0.85]
+    # Apply "Market Haircut" to probabilities
+    # High market stress makes customer payments less reliable
+    stress_haircut = 1.0 - (market_stress * 0.5) 
     
-    # 3-day projection: Expected Inflow vs Mandatory Outflow
-    inflow_3d = sum(r.amount * r.probability for r in receivables if r.expected_in <= 3)
+    total_inflow = sum(r.amount * r.probability * stress_haircut for r in receivables)
+    
+    # Identify high-value targets for "Nudging"
+    sorted_rec = sorted(receivables, key=lambda x: x.amount, reverse=True)
+    high_value = [r.id for r in sorted_rec[:3]]
+    
+    # 3-day projection with stress adjustment
+    inflow_3d = sum(r.amount * (r.probability * stress_haircut) for r in receivables if r.expected_in <= 3)
     outflow_3d = sum(i.amount for i in invoices if i.due_in <= 3 and i.status != "paid")
     
     net_position = (cash + inflow_3d) - outflow_3d
     
+    # Strategic Buffer Recommendation
+    credit_buffer_needed = abs(net_position) if net_position < 0 else 0.0
+    
     if net_position < 0:
         rec = "cash_critical"
-        reasoning = f"CRITICAL: Expected deficit of ₹{abs(net_position):.0f} in 3 days. Immediate credit or deferral required."
-    elif net_position < cash * 0.5:
+        reasoning = f"Economic stress ({market_stress:.1f}) is impacting collections. Deficit of ₹{abs(net_position):.0f} expected. Draw credit immediately."
+    elif net_position < (outflow_3d * 0.5):
         rec = "cash_tight"
-        reasoning = f"TIGHT: Inflows only cover {((cash+inflow_3d)/outflow_3d*100 if outflow_3d > 0 else 100):.0f}% of upcoming debt. Conserve cash."
+        reasoning = "Liquidity is thin. High-value collections (IDs: " + ", ".join(high_value) + ") are critical."
     else:
         rec = "cash_sufficient"
-        reasoning = f"SUFFICIENT: Net 3-day position of ₹{net_position:.0f} is healthy."
+        reasoning = f"Net position of ₹{net_position:.0f} is safe despite market stress."
 
     return {
-        "total_expected_inflow": round(total_inflow, 2),
-        "reliable_inflows": reliable,
-        "outflow_3d_target": round(outflow_3d, 2),
+        "expected_inflow_total": round(total_inflow, 2),
+        "high_value_receivables": high_value,
         "net_3day_position": round(net_position, 2),
+        "credit_buffer_needed": round(credit_buffer_needed, 2),
         "recommendation": rec,
         "reasoning": reasoning,
     }
 
 
-def risk_agent(cash: float, credit_used: float, credit_limit: float,
-               world_hints: Dict[str, Any]) -> Dict[str, Any]:
+def risk_agent(cash: float, total_debt: float, credit_used: float, credit_limit: float, world_hints: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Risk Agent: Assesses financial health and hidden threats.
-    Gets PARTIAL information from the world model via world_hints.
+    Risk Agent: Evaluates both external (market) and internal (debt) threats.
     """
-    credit_util = (credit_used / credit_limit * 100) if credit_limit > 0 else 0
     market_stress = world_hints.get("market_stress", 0.0)
     risk_level_hint = world_hints.get("upcoming_risk_level", "low")
     vendor_sentiment = world_hints.get("vendor_sentiment", {})
 
     threats = []
-    if credit_util > 60:
-        threats.append(f"Credit utilization at {credit_util:.0f}% — approaching limit")
-    if market_stress > 0.2:
-        threats.append(f"Market stress elevated ({market_stress:.2f}) — expect volatility")
-    if risk_level_hint == "critical":
-        threats.append("Intelligence suggests CRITICAL upcoming financial events")
-    elif risk_level_hint == "elevated":
-        threats.append("Elevated risk of upcoming cash shocks detected")
-    for vid, sentiment in vendor_sentiment.items():
-        if sentiment == "negative":
-            threats.append(f"Vendor {vid} sentiment is negative — negotiation may fail")
+    
+    # Internal Threat: Liquidity vs Debt
+    debt_ratio = total_debt / (cash + 1.0)
+    if debt_ratio > 3.0:
+        threats.append("Critical Debt Overload")
+    elif debt_ratio > 1.5:
+        threats.append("High Debt-to-Cash Ratio")
 
-    if len(threats) >= 3 or risk_level_hint == "critical":
+    # Internal Threat: Credit Exhaustion
+    credit_utilization = credit_used / (credit_limit + 1.0)
+    if credit_utilization > 0.85:
+        threats.append("Credit Line Exhausted")
+    elif credit_utilization > 0.6:
+        threats.append("Low Credit Availability")
+
+    # External Threats
+    if market_stress > 0.4:
+        threats.append(f"Market Volatility (Level: {market_stress:.1f})")
+    if risk_level_hint == "critical":
+        threats.append("Hidden Cyber/Fraud Threat Detected")
+
+    # Final Risk Assessment
+    if any("Critical" in t or "Exhausted" in t for t in threats) or len(threats) >= 3:
         risk_level = "critical"
-        rec = "reduce_spending"
-        buffer = cash * 0.5
-    elif len(threats) >= 2 or risk_level_hint == "elevated":
+        rec = "emergency_halt"
+        survival_target = total_debt * 0.8
+    elif len(threats) >= 2 or market_stress > 0.5:
         risk_level = "elevated"
-        rec = "draw_credit"
-        buffer = cash * 0.4
-    elif len(threats) >= 1:
-        risk_level = "moderate"
-        rec = "maintain_buffer"
-        buffer = cash * 0.3
+        rec = "conserve_and_buffer"
+        survival_target = total_debt * 0.5
     else:
         risk_level = "low"
-        rec = "maintain_buffer"
-        buffer = cash * 0.2
+        rec = "normal_operations"
+        survival_target = total_debt * 0.2
 
-    reasoning = f"Risk level: {risk_level}. " + (threats[0] if threats else "No immediate threats detected.")
+    reasoning = f"Overall risk is {risk_level}. Detected {len(threats)} threats. Survival requires ₹{survival_target:.0f} buffer."
 
     return {
         "risk_level": risk_level,
-        "credit_utilization": round(credit_util, 1),
-        "recommended_buffer": round(buffer, 2),
-        "threats": threats,
+        "active_threats": threats,
+        "credit_utilization": f"{credit_utilization*100:.0f}%",
+        "survival_cash_target": round(survival_target, 2),
         "recommendation": rec,
-        "reasoning": reasoning,
+        "reasoning": reasoning
     }
 
 
-def vendor_agent(vendor_profile, invoice, company_trust_history: float = 0.5) -> Dict[str, Any]:
+def vendor_agent(vendor_profile: Dict[str, Any], invoice: Any, vendor_mood: float = 0.0, trust_score: float = 0.5) -> Dict[str, Any]:
     """
-    Vendor Agent: Responds to negotiation requests.
-    Decision is probabilistic based on vendor profile and company history.
+    Vendor Agent: Decides whether to accept or reject a negotiation request.
+    Logic: (Trust + Mood) vs (Amount + Risk)
     """
-    flexibility = vendor_profile.trust_score * vendor_profile.negotiation_flexibility
-    # Company trust history modifies the outcome
-    accept_prob = flexibility * (0.5 + 0.5 * company_trust_history)
-
+    # Success Probability Base
+    success_prob = 0.4 + (trust_score * 0.4) + (vendor_mood * 0.3)
+    
+    # "Large Bill" Friction: Every ₹100k reduces success chance by 10%
+    amount_penalty = (invoice.amount / 100000) * 0.1
+    success_prob -= amount_penalty
+    
+    # "Bad Vendor" check: If the vendor is a high-interest predator, they are less likely to negotiate
+    is_predatory = invoice.interest > 0.15
+    if is_predatory:
+        success_prob -= 0.2
+        
+    success_prob = max(0.05, min(0.95, success_prob))
+    
     roll = random.random()
-
-    if roll < accept_prob:
-        return {
-            "decision": "accept",
-            "late_fee_waiver": True,
-            "extension_days": random.randint(2, 5),
-            "counter_terms": "",
-            "reasoning": f"Good relationship with this customer. Waiving late fee and extending by {random.randint(2,5)} days.",
-        }
-    elif roll < accept_prob + 0.3:
-        ext = random.randint(1, 3)
-        return {
-            "decision": "counter",
-            "late_fee_waiver": False,
-            "extension_days": ext,
-            "counter_terms": f"Extend deadline by {ext} days but late fee remains.",
-            "reasoning": "Willing to extend but cannot waive penalties.",
-        }
+    accepted = roll < success_prob
+    
+    if accepted:
+        msg = f"Vendor accepted. Terms: 5-day extension."
     else:
-        return {
-            "decision": "reject",
-            "late_fee_waiver": False,
-            "extension_days": 0,
-            "counter_terms": "",
-            "reasoning": "Cannot accommodate renegotiation at this time. Full payment expected.",
-        }
+        if vendor_mood < -0.2:
+            msg = "Vendor is frustrated with payment delays. Request flatly REJECTED."
+        elif amount_penalty > 0.3:
+            msg = "The amount is too large for an automated extension. Request REJECTED."
+        else:
+            msg = "Negotiation failed. Standard terms apply."
+
+    return {
+        "accepted": accepted,
+        "success_probability": round(success_prob, 2),
+        "vendor_message": msg,
+        "is_predatory": is_predatory,
+        "extension_days": 5 if accepted else 0
+    }
 
 
 # ═══════════════════════════════════════════════════════
@@ -361,26 +376,26 @@ def risk_agent_icl(cash: float, credit_used: float, credit_limit: float, world_h
 def format_memo(agent_name: str, memo: Dict[str, Any]) -> str:
     """Convert structured memo to a human-readable string for the observation."""
     if agent_name == "Expenditure":
-        critical = memo.get("critical_invoices", [])
         return (
-            f"[{memo.get('recommended_action', 'UNKNOWN').upper()}] "
-            f"Total liability: ₹{memo.get('total_liability', 0):.0f}. "
-            f"Critical invoices: {critical if critical else 'None'}. "
+            f"[{memo.get('recommendation', 'UNKNOWN').upper()}] "
+            f"Total Debt: ₹{memo.get('total_outstanding', 0):.0f}. "
+            f"Top Priority: {memo.get('priority_queue', [{}])[0].get('id', 'None')}. "
             f"{memo.get('reasoning', '')}"
         )
     elif agent_name == "Revenue":
         return (
             f"[{memo.get('recommendation', 'UNKNOWN').upper()}] "
-            f"Expected inflow: ₹{memo.get('total_expected_inflow', 0):.0f}. "
-            f"3-day projection: ₹{memo.get('cash_projection_3day', 0):.0f}. "
+            f"Inflow: ₹{memo.get('expected_inflow_total', 0):.0f}. "
+            f"Net Position: ₹{memo.get('net_3day_position', 0):.0f}. "
             f"{memo.get('reasoning', '')}"
         )
     elif agent_name == "Risk":
         return (
             f"[{memo.get('risk_level', 'UNKNOWN').upper()}] "
-            f"Credit util: {memo.get('credit_utilization', 0):.0f}%. "
-            f"Buffer: ₹{memo.get('recommended_buffer', 0):.0f}. "
-            f"Threats: {len(memo.get('threats', []))}. "
+            f"Credit: {memo.get('credit_utilization', 'N/A')}. "
+            f"Survival Target: ₹{memo.get('survival_cash_target', 0):.0f}. "
+            f"Threats: {len(memo.get('active_threats', []))}. "
             f"{memo.get('reasoning', '')}"
         )
+    return "No memo available."
     return json.dumps(memo)

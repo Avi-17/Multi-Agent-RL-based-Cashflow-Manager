@@ -5,12 +5,13 @@ import sys
 import torch
 from dotenv import load_dotenv
 
-# Ensure the project root is in sys.path for absolute imports
-root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if root_dir not in sys.path:
-    sys.path.insert(0, root_dir)
-
-from models import CashflowmanagerAction
+try:
+    from models import CashflowmanagerAction
+except ImportError:
+    try:
+        from cashflowmanager.models import CashflowmanagerAction
+    except ImportError:
+        from ..models import CashflowmanagerAction
 
 try:
     from openai import OpenAI

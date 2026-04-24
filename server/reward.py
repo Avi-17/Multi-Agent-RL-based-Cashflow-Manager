@@ -12,35 +12,36 @@ Components:
 """
 
 
-def compute_reward(cash, late_fee, interest, credit_used, paid,
-                   vendor_trust_change, shock_absorbed, negotiation_success=False):
+def compute_reward(cash, late_fee, interest, credit_used, credit_limit, paid, 
+                   is_bankrupt, negotiation_success=False):
     """
-    Comprehensive reward for CFO training.
-    
-    Args:
-        cash: Current cash balance
-        late_fee: Total late fees incurred this step
-        interest: Total interest incurred this step
-        credit_used: Total credit drawn so far
-        paid: Number of invoices fully settled this step
-        vendor_trust_change: Net trust change (+ is good)
-        shock_absorbed: Whether a cash shock was survived
-        negotiation_success: Whether negotiation succeeded
-    
-    Returns:
-        float: reward signal
+    High-Stakes Reward for CFO training.
+    Focuses on survival, debt reduction, and avoiding predatory fees.
     """
-    # Cap credit penalty to avoid runaway negatives (credit_used is cumulative)
-    credit_penalty = min(credit_used * 0.01, 50.0)
+    # 1. CRITICAL: Bankruptcy Penalty
+    if is_bankrupt or cash < -100000:
+        return -5000.0  # Massive penalty for total failure
+
+    # 2. Credit Utilization Scaling (Exponential)
+    # Using 10% is fine, using 90% is a crisis
+    utilization = credit_used / (credit_limit + 1.0)
+    util_penalty = (utilization ** 2) * 500.0  # Escalates quickly as limit is hit
+
+    # 3. Liquidity vs Debt Balance
+    # We reward cash, but penalize it if we have late fees (idleness)
+    liquidity_reward = 0.001 * cash if late_fee == 0 else -0.001 * cash
 
     reward = (
-        0.002 * cash                    # Reward for liquidity
-        - 3.0 * late_fee                # Heavy penalty for late fees
-        - 2.0 * interest                # Penalty for interest
-        - credit_penalty                # Capped penalty for credit reliance
-        + 20.0 * paid                   # High incentive for settlement
-        + 50.0 * vendor_trust_change    # Reward for trust improvement
-        + 30.0 * (1 if shock_absorbed else 0)      # Surviving shocks
-        + 15.0 * (1 if negotiation_success else 0) # Successful negotiation
+        liquidity_reward                # Reward for healthy cash
+        - 5.0 * late_fee                # Increased penalty for late fees
+        - 2.5 * interest                # Penalty for interest
+        - util_penalty                  # Scaleable credit penalty
+        + 30.0 * paid                   # Incentive for settlement
+        + 25.0 * (1 if negotiation_success else 0) # Successful negotiation
     )
+
+    # 4. Success Bonus
+    # Small daily reward for staying alive
+    reward += 10.0
+
     return round(reward, 4)

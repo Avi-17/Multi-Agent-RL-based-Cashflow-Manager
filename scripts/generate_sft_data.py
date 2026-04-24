@@ -32,14 +32,18 @@ from server.agents import (
 from models import CashflowmanagerAction
 
 
-def build_expenditure_sample(invoices, cash, memo):
+def build_expenditure_sample(invoices, cash, rev_projection, memo):
     """Build one SFT training sample for the Expenditure Agent."""
     inv_str = "\n".join([
         f"- ID: {inv.id} | Amount: ₹{inv.amount:.0f} | Due: {inv.due_in}d | "
-        f"Late Fee: ₹{inv.late_fee:.0f} | Interest: {inv.interest*100:.1f}% | Status: {inv.status}"
+        f"Interest: {inv.interest*100:.1f}%"
         for inv in invoices if inv.status != "paid"
-    ])
-    user_msg = f"Cash available: ₹{cash:.0f}\n\nInvoices:\n{inv_str}"
+    ][:8])
+    user_msg = (
+        f"Cash available: ₹{cash:.0f}\n"
+        f"Projected Inflow (3-day): ₹{rev_projection:.0f}\n\n"
+        f"Invoices:\n{inv_str}"
+    )
     assistant_msg = json.dumps(memo, indent=2)
     return {
         "messages": [
@@ -50,13 +54,21 @@ def build_expenditure_sample(invoices, cash, memo):
     }
 
 
-def build_revenue_sample(receivables, cash, day, memo):
+def build_revenue_sample(receivables, invoices, cash, day, market_stress, memo):
     """Build one SFT training sample for the Revenue Agent."""
     rec_str = "\n".join([
         f"- ID: {r.id} | Amount: ₹{r.amount:.0f} | Due: {r.expected_in}d | Prob: {r.probability*100:.0f}%"
         for r in receivables
     ])
-    user_msg = f"Day: {day} | Cash: ₹{cash:.0f}\n\nReceivables:\n{rec_str}"
+    inv_str = "\n".join([
+        f"- {i.id}: ₹{i.amount:.0f} due in {i.due_in}d"
+        for i in invoices if i.status != "paid"
+    ][:5])
+    user_msg = (
+        f"Day: {day} | Cash: ₹{cash:.0f} | Market Stress: {market_stress:.1f}\n\n"
+        f"UPCOMING DEBT:\n{inv_str}\n\n"
+        f"RECEIVABLES:\n{rec_str}"
+    )
     assistant_msg = json.dumps(memo, indent=2)
     return {
         "messages": [
@@ -67,13 +79,13 @@ def build_revenue_sample(receivables, cash, day, memo):
     }
 
 
-def build_risk_sample(cash, credit_used, credit_limit, world_hints, memo):
+def build_risk_sample(cash, total_debt, credit_used, credit_limit, world_hints, memo):
     """Build one SFT training sample for the Risk Agent."""
     user_msg = (
-        f"Cash: ₹{cash:.0f} | Credit Used: ₹{credit_used:.0f}/{credit_limit:.0f}\n"
+        f"Cash: ₹{cash:.0f} | Total Debt: ₹{total_debt:.0f}\n"
+        f"Credit Used: ₹{credit_used:.0f}/{credit_limit:.0f}\n"
         f"Market stress: {world_hints.get('market_stress', 0)}\n"
-        f"Risk level hint: {world_hints.get('upcoming_risk_level', 'unknown')}\n"
-        f"Vendor sentiment: {json.dumps(world_hints.get('vendor_sentiment', {}))}"
+        f"Risk level hint: {world_hints.get('upcoming_risk_level', 'unknown')}"
     )
     assistant_msg = json.dumps(memo, indent=2)
     return {
@@ -135,11 +147,14 @@ def generate_data(num_episodes=200, output_dir="data"):
             risk_memo = obs.advisor_memos.get("Risk", {})
 
             if active:
-                exp_data.append(build_expenditure_sample(active, obs.cash, exp_memo))
+                exp_data.append(build_expenditure_sample(active, obs.cash, rev_memo.get("net_3day_position", 0), exp_memo))
             if obs.receivables:
-                rev_data.append(build_revenue_sample(obs.receivables, obs.cash, obs.day, rev_memo))
+                rev_data.append(build_revenue_sample(
+                    obs.receivables, obs.invoices, obs.cash, obs.day, 
+                    env.world_model.market_stress, rev_memo
+                ))
             risk_data.append(build_risk_sample(
-                obs.cash, obs.credit_used, obs.credit_limit,
+                obs.cash, exp_memo.get("total_outstanding", 0.0), obs.credit_used, obs.credit_limit,
                 env.world_model.get_risk_hints(obs.day), risk_memo
             ))
 
