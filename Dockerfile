@@ -13,14 +13,19 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # 3. Optimized dependency installation
-# Use mounts to avoid copying files until necessary
+# Use mounts to avoid copying files until necessary and utilize persistent cache
+# --no-install-project avoids building the project itself (which fails without source code)
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
-    uv sync --frozen --no-editable --no-dev
+    uv sync --frozen --no-install-project --no-dev
 
 # 4. Copy the rest of the application
 COPY . /app/env
+
+# 5. Final sync to install the project itself
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev
 
 # =========================
 # Runtime Stage
