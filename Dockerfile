@@ -1,112 +1,43 @@
-# # =========================
-# # Base Image
-# # =========================
-# ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
-# FROM ${BASE_IMAGE} AS builder
-
-# WORKDIR /app
-
-# # Install git (needed for dependencies)
-# RUN apt-get update && \
-#     apt-get install -y --no-install-recommends git curl && \
-#     rm -rf /var/lib/apt/lists/*
-
-# # Copy project
-# COPY . /app/env
-# WORKDIR /app/env
-
-# # Ensure uv exists
-# RUN if ! command -v uv >/dev/null 2>&1; then \
-#         curl -LsSf https://astral.sh/uv/install.sh | sh && \
-#         mv /root/.local/bin/uv /usr/local/bin/uv && \
-#         mv /root/.local/bin/uvx /usr/local/bin/uvx; \
-#     fi
-
-# # Install dependencies
-# RUN --mount=type=cache,target=/root/.cache/uv \
-#     if [ -f uv.lock ]; then \
-#         uv sync --frozen --no-editable; \
-#     else \
-#         uv sync --no-editable; \
-#     fi
-
-
-# # =========================
-# # Runtime
-# # =========================
-# FROM ${BASE_IMAGE}
-
-# WORKDIR /app/env
-
-# # Copy virtual env
-# COPY --from=builder /app/env/.venv /app/.venv
-
-# # Copy code
-# COPY --from=builder /app/env /app/env
-
-# # Activate venv
-# ENV PATH="/app/.venv/bin:$PATH"
-# ENV PYTHONPATH="/app/env:$PYTHONPATH"
-
-# # IMPORTANT: Gradio port
-# EXPOSE 7860
-
-# # Optional lightweight healthcheck
-# HEALTHCHECK --interval=30s --timeout=5s \
-#   CMD curl -f http://localhost:7860 || exit 1
-
-# # Run Gradio app
-# # CMD ["python", "server/app.py"]
-# CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
-
-
-# =========================
-# Base Image
-# =========================
+# Use a specific version of the base image for reproducibility
 ARG BASE_IMAGE=ghcr.io/meta-pytorch/openenv-base:latest
 FROM ${BASE_IMAGE} AS builder
 
-WORKDIR /app
+# 1. Install uv binary from official image (much faster than curl)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git curl && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install uv once
-RUN if ! command -v uv >/dev/null 2>&1; then \
-        curl -LsSf https://astral.sh/uv/install.sh | sh && \
-        mv /root/.local/bin/uv /usr/local/bin/uv && \
-        mv /root/.local/bin/uvx /usr/local/bin/uvx; \
-    fi
-
-# 🔥 COPY ONLY dependency files first (cache optimization)
-COPY pyproject.toml uv.lock* /app/env/
 WORKDIR /app/env
 
-# Install deps (cached unless deps change)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f uv.lock ]; then \
-        uv sync --frozen --no-editable; \
-    else \
-        uv sync --no-editable; \
-    fi
+# 2. Install system dependencies (only if needed for building)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
 
-# 🔥 NOW copy rest of code (doesn't break cache)
+# 3. Optimized dependency installation
+# Use mounts to avoid copying files until necessary
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    uv sync --frozen --no-editable --no-dev
+
+# 4. Copy the rest of the application
 COPY . /app/env
 
-
 # =========================
-# Runtime
+# Runtime Stage
 # =========================
 FROM ${BASE_IMAGE}
 
 WORKDIR /app/env
 
+# Copy the virtual environment and application code from the builder
 COPY --from=builder /app/env/.venv /app/.venv
 COPY --from=builder /app/env /app/env
 
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/env:$PYTHONPATH"
+# Set environment variables in a single layer
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/env:$PYTHONPATH" \
+    PYTHONUNBUFFERED=1 \
+    GRADIO_SERVER_NAME="0.0.0.0"
 
 EXPOSE 7860
 
