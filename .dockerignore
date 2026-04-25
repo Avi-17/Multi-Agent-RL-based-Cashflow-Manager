@@ -1,0 +1,23 @@
+# Ignore heavy stuff
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+
+.git
+.gitignore
+
+node_modules
+dist
+build
+
+*.log
+*.tmp
+
+.cache
+.pytest_cache
+
+# Optional
+data/*.csv
+data/*.parquet
