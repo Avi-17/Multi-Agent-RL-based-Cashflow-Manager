@@ -1,14 +1,6 @@
 """
-FastAPI + Gradio server for the Cashflow Multi-Agent RL Environment.
+FastAPI + Gradio server for the Cashflow Simulation Engine.
 """
-
-from fastapi import FastAPI
-import gradio as gr
-import pandas as pd
-import time
-import json
-
-from openenv.core.env_server.http_server import create_app
 
 import sys
 import os
@@ -16,205 +8,319 @@ print(f"DEBUG: Starting server from CWD: {os.getcwd()}")
 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 print(f"DEBUG: Root dir added to path: {root_dir}")
 sys.path.insert(0, root_dir)
-print(f"DEBUG: sys.path[0]: {sys.path[0]}")
 
-try:
-    from models import CashflowmanagerAction, CashflowmanagerObservation
-    from server.cashflowmanager_environment import CashflowmanagerEnvironment
-    print("DEBUG: Successfully imported from root level")
-except ImportError as e:
-    print(f"DEBUG: Root import failed: {e}")
-    try:
-        from cashflowmanager.models import CashflowmanagerAction, CashflowmanagerObservation
-        from cashflowmanager.server.cashflowmanager_environment import CashflowmanagerEnvironment
-        print("DEBUG: Successfully imported from cashflowmanager package")
-    except ImportError as e2:
-        print(f"DEBUG: Package import failed: {e2}")
-        from ..models import CashflowmanagerAction, CashflowmanagerObservation
-        from .cashflowmanager_environment import CashflowmanagerEnvironment
-        print("DEBUG: Using relative imports")
+from fastapi import FastAPI
+import gradio as gr
+import pandas as pd
+import time
+import random
 
+from server.cashflowmanager_environment import run_simulation, init_simulation, step_one_day
+from models import SimulationResult, DayLog
 
-app: FastAPI = create_app(
-    CashflowmanagerEnvironment,
-    CashflowmanagerAction,
-    CashflowmanagerObservation,
-    env_name="cashflowmanager",
-    max_concurrent_envs=1,
-)
-print("DEBUG: FastAPI App created successfully")
+# Initialize FastAPI app for mounting Gradio
+app = FastAPI()
 
-try:
-    from server.client import groq_policy, clear_action_cache
-except ImportError:
-    try:
-        from cashflowmanager.server.client import groq_policy, clear_action_cache
-    except ImportError:
-        from .client import groq_policy, clear_action_cache
+# ═══════════════════════════════════════════════
+# Day-by-Day state (persisted between button clicks)
+# ═══════════════════════════════════════════════
+
+_day_state = None          # State object
+_day_incoming = None       # list of IncomingInvoice
+_day_logs = []             # accumulated DayLog entries
+_day_sim_window = 7        # max days
+_day_seed = 0              # seed used
+_day_difficulty = "medium"
 
 
-# Global state for the interactive UI
-_env_instance = None
-_last_obs = None
-_history = []
+# ═══════════════════════════════════════════════
+# MODE 1: Full Simulation (run all days at once)
+# ═══════════════════════════════════════════════
 
-def get_env(seed=42, difficulty="medium"):
-    global _env_instance, _last_obs, _history
-    if _env_instance is None:
-        _env_instance = CashflowmanagerEnvironment()
-        clear_action_cache()
-        _last_obs = _env_instance.reset(seed=seed, difficulty=difficulty)
-        _history = []
-    return _env_instance, _last_obs
-
-def format_invoices(invoices):
-    if not invoices:
-        return "No active invoices."
-    rows = []
-    for inv in invoices:
-        urgency = "🔴 OVERDUE" if inv.due_in <= 0 else "🟡 URGENT" if inv.due_in <= 2 else "🟢 OK"
-        rows.append(f"{urgency} | {inv.id} | ₹{inv.amount:.0f} | Due: {inv.due_in}d | Vendor: {inv.vendor_id}")
-    return "\n".join(rows)
-
-def format_receivables(receivables):
-    if not receivables:
-        return "No expected inflows."
-    rows = []
-    for rec in receivables:
-        rows.append(f"₹{rec.amount:.0f} from {rec.customer_id} in {rec.expected_in}d (prob: {rec.probability*100:.0f}%)")
-    return "\n".join(rows)
-
-def process_step(action_type, invoice_id=None, amount=0.0, memo=None):
-    global _env_instance, _last_obs, _history
-    env, obs = get_env()
-    
-    if obs.done:
-        return update_ui()
-
-    # Create action
-    action = CashflowmanagerAction(type=action_type, invoice_id=invoice_id, amount=amount, memo=memo)
-    
-    # Step environment
-    new_obs = env.step(action)
-    
-    # Log to history
-    entry = {
-        "Step": env.state.step_count,
-        "Day": new_obs.day,
-        "Action": f"{action.type}({action.invoice_id or 'N/A'})",
-        "Amount": f"₹{action.amount:.0f}" if action.amount else "N/A",
-        "Cash": f"₹{new_obs.cash:.0f}",
-        "Reward": round(new_obs.reward, 2),
-        "Reasoning": action.memo or "Manual Action",
-        "Events": " | ".join(new_obs.world_events) if new_obs.world_events else "None"
-    }
-    _history.insert(0, entry)
-    _last_obs = new_obs
-    
-    return update_ui()
-
-def ai_step():
-    global _last_obs
-    if _last_obs is None or _last_obs.done:
-        return update_ui()
-    
-    # Let the policy decide
-    action = groq_policy(_last_obs, [])
-    return process_step(action.type, action.invoice_id, action.amount, memo=action.memo)
-
-def reset_sim(seed, difficulty):
-    global _env_instance, _last_obs, _history
-    _env_instance = None
-    get_env(seed=int(seed), difficulty=difficulty)
-    return update_ui()
-
-def update_ui():
-    global _last_obs, _history
-    obs = _last_obs
-    
-    history_df = pd.DataFrame(_history)
-    
-    status = f"### Day {obs.day} | Step {obs.metadata.get('step', 0)}\n"
-    status += f"**Cash:** ₹{obs.cash:.0f} | **Credit Used:** ₹{obs.credit_used:.0f}/{obs.credit_limit:.0f}\n"
-    if obs.done:
-        status += "## 🏁 EPISODE FINISHED\n"
-        
-    memos = "#### 🤖 Advisor Memos\n"
-    for agent, msg in obs.advisor_messages.items():
-        memos += f"- **{agent}:** {msg}\n"
-        
-    world = "#### 🌍 World Events\n"
-    if obs.world_events:
-        for e in obs.world_events:
-            world += f"- {e}\n"
+def run_full_simulation(difficulty: str, sim_window: int, seed: int):
+    """Run all days in one shot and return formatted results."""
+    if not seed or seed <= 0:
+        seed = int(time.time() * 1000) % 100000
     else:
-        world += "- No events this step."
+        seed = int(seed)
 
-    invoice_list = [inv.id for inv in obs.invoices]
-    
+    result = run_simulation(
+        difficulty=difficulty,
+        sim_window=int(sim_window),
+        seed=seed,
+    )
+    summary, log, chart = _format_result(result)
+    return summary, log, chart
+
+
+# ═══════════════════════════════════════════════
+# MODE 2: Day-by-Day Simulation
+# ═══════════════════════════════════════════════
+
+def start_day_by_day(difficulty: str, sim_window: int, seed: int):
+    """Initialize a new day-by-day simulation. Does NOT run any days yet."""
+    global _day_state, _day_incoming, _day_logs, _day_sim_window, _day_seed, _day_difficulty
+
+    if not seed or seed <= 0:
+        seed = int(time.time() * 1000) % 100000
+    else:
+        seed = int(seed)
+
+    _day_state, _day_incoming = init_simulation(
+        difficulty=difficulty,
+        sim_window=int(sim_window),
+        seed=seed,
+    )
+    _day_logs = []
+    _day_sim_window = int(sim_window)
+    _day_seed = seed
+    _day_difficulty = difficulty
+
+    status = (
+        f"## 🎬 Simulation Initialized\n"
+        f"**Difficulty:** {difficulty.upper()} | **Window:** {sim_window} days | **Seed:** {seed}\n\n"
+        f"**Starting Cash:** ₹{_day_state.cash:,.0f} | **Credit Limit:** ₹{_day_state.credit_limit:,.0f}\n\n"
+        f"**Active Invoices:** {len(_day_state.active_invoices)} | "
+        f"**Upcoming Invoices:** {_day_state.upcoming_invoice_count} | "
+        f"**Receivables:** {len(_day_state.receivables)}\n\n"
+        f"*Click **▶ Next Day** to step through the simulation.*"
+    )
+    return status, "", ""
+
+
+def advance_one_day():
+    """Step the simulation forward by one day and append the log."""
+    global _day_state, _day_incoming, _day_logs
+
+    if _day_state is None:
+        return "⚠️ *No simulation initialized. Click **🎬 Start New** first.*", "", ""
+
+    current_day = _day_state.day + 1
+    if current_day > _day_sim_window:
+        status = _build_status_panel() + "\n\n## 🏁 Simulation Complete!"
+        return status, _build_metrics_panel(), _format_day_logs(_day_logs)
+
+    # Step one day
+    day_log = step_one_day(_day_state, _day_incoming)
+    _day_logs.append(day_log)
+
+    # Check if this was the last day
+    if current_day >= _day_sim_window:
+        status = _build_status_panel() + "\n\n## 🏁 Simulation Complete!"
+    else:
+        status = _build_status_panel()
+
+    return status, _build_metrics_panel(), _format_day_logs(_day_logs)
+
+
+def _build_status_panel() -> str:
+    """Build the left panel: status summary table."""
+    if not _day_logs:
+        return ""
+
+    total_reward = sum(d.reward for d in _day_logs)
+    total_fees = sum(d.late_fees_incurred for d in _day_logs)
+    total_interest = sum(d.interest_incurred for d in _day_logs)
+    total_revenue = sum(d.revenue_collected for d in _day_logs)
+    paid_count = sum(d.invoices_paid_today for d in _day_logs)
+
+    last = _day_logs[-1]
     return (
-        status, 
-        memos, 
-        world, 
-        format_invoices(obs.invoices), 
-        format_receivables(obs.receivables),
-        history_df,
-        gr.Dropdown(choices=invoice_list, value=invoice_list[0] if invoice_list else None)
+        f"## 📊 Status after Day {last.day} / {_day_sim_window}\n"
+        f"| Metric | Value |\n"
+        f"|--------|-------|\n"
+        f"| **Difficulty** | {_day_difficulty.upper()} |\n"
+        f"| **Seed** | {_day_seed} |\n"
+        f"| **Current Cash** | ₹{last.closing_cash:,.0f} |\n"
+        f"| **Credit Used** | ₹{last.closing_credit_used:,.0f} |\n"
+        f"| **Invoices Paid (so far)** | {paid_count} |\n"
+        f"| **Active Invoices** | {len(_day_state.active_invoices)} |\n"
+        f"| **Overdue** | {len(_day_state.overdue_invoices)} |\n"
+        f"| **Total Late Fees** | ₹{total_fees:,.0f} |\n"
+        f"| **Total Interest** | ₹{total_interest:,.0f} |\n"
+        f"| **Revenue Collected** | ₹{total_revenue:,.0f} |\n"
+        f"| **Total Reward** | {total_reward:.1f} |\n"
     )
 
+
+def _build_metrics_panel() -> str:
+    """Build the right panel: per-day running metrics table."""
+    if not _day_logs:
+        return ""
+
+    md = "## 📈 Running Metrics\n"
+    md += "| Day | Cash | Reward | Late Fees | Interest |\n"
+    md += "|-----|------|--------|-----------|----------|\n"
+    for d in _day_logs:
+        md += f"| {d.day} | ₹{d.closing_cash:,.0f} | {d.reward:.1f} | ₹{d.late_fees_incurred:,.0f} | ₹{d.interest_incurred:,.0f} |\n"
+
+    return md
+
+
+def _format_day_logs(logs: list) -> str:
+    """Format accumulated day logs into markdown."""
+    lines = []
+    for day_log in logs:
+        lines.append(f"### 📅 Day {day_log.day}")
+        lines.append(f"**Opening:** Cash ₹{day_log.opening_cash:,.0f} | Credit Used ₹{day_log.opening_credit_used:,.0f}")
+        lines.append(f"**Active Invoices:** {day_log.active_invoice_count} | **Overdue:** {day_log.overdue_invoice_count}")
+        lines.append("")
+
+        if day_log.events:
+            lines.append("**Events:**")
+            for event in day_log.events:
+                lines.append(f"- {event}")
+            lines.append("")
+
+        lines.append("**Advisor Memos:**")
+        for agent, memo in day_log.advisor_memos.items():
+            lines.append(f"**{agent}:**")
+            for line in memo.split("\n"):
+                lines.append(f"> {line}")
+            lines.append("")
+
+        if day_log.actions:
+            lines.append("**CFO Actions:**")
+            for action in day_log.actions:
+                icon = {"pay": "✅", "partial": "💳", "credit": "🏦", "defer": "⏳", "negotiate": "🤝"}.get(action.type, "❓")
+                target = f" → {action.invoice_id}" if action.invoice_id else ""
+                amount_str = f" (₹{action.amount:,.0f})" if action.amount else ""
+                # "reasoning" is mapped to "memo" in CashflowmanagerAction
+                lines.append(f"- {icon} **{action.type.upper()}**{target}{amount_str}: {action.memo}")
+            lines.append("")
+
+        lines.append(f"**Closing:** Cash ₹{day_log.closing_cash:,.0f} | Credit ₹{day_log.closing_credit_used:,.0f}")
+        lines.append(f"📈 Reward: **{day_log.reward:.1f}** | Late fees: ₹{day_log.late_fees_incurred:,.0f} | Interest: ₹{day_log.interest_incurred:,.0f}")
+        if day_log.revenue_collected > 0:
+            lines.append(f"💰 Revenue collected: ₹{day_log.revenue_collected:,.0f}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _build_day_chart():
+    if not _day_logs:
+        return _empty_chart()
+    return pd.DataFrame({
+        "Day": [d.day for d in _day_logs],
+        "Cash": [d.closing_cash for d in _day_logs],
+        "Reward": [d.reward for d in _day_logs],
+        "Late Fees": [d.late_fees_incurred for d in _day_logs],
+    })
+
+
+def _empty_chart():
+    return pd.DataFrame({"Day": [], "Cash": [], "Reward": [], "Late Fees": []})
+
+
+# ═══════════════════════════════════════════════
+# Formatting for Full Simulation mode
+# ═══════════════════════════════════════════════
+
+def _format_result(result: SimulationResult):
+    summary = f"""## 📊 Simulation Summary
+| Metric | Value |
+|--------|-------|
+| **Difficulty** | {result.difficulty.upper()} |
+| **Window** | {result.sim_window} days |
+| **Seed** | {result.seed} |
+| **Final Cash** | ₹{result.final_cash:,.0f} |
+| **Credit Used** | ₹{result.final_credit_used:,.0f} |
+| **Invoices Paid** | {result.invoices_paid} / {result.total_invoices} |
+| **Invoices Overdue** | {result.invoices_overdue} |
+| **Total Late Fees** | ₹{result.total_late_fees:,.0f} |
+| **Total Interest** | ₹{result.total_interest:,.0f} |
+| **Revenue Collected** | ₹{result.total_revenue_collected:,.0f} |
+| **Total Reward** | {result.total_reward:.1f} |
+"""
+
+    log = _format_day_logs(result.days)
+
+    chart_data = pd.DataFrame({
+        "Day": [d.day for d in result.days],
+        "Cash": [d.closing_cash for d in result.days],
+        "Reward": [d.reward for d in result.days],
+        "Late Fees": [d.late_fees_incurred for d in result.days],
+    })
+
+    return summary, log, chart_data
+
+
+# ═══════════════════════════════════════════════
+# Gradio UI
+# ═══════════════════════════════════════════════
+
 def build_ui():
-    with gr.Blocks(title="Cashflow Multi-Agent RL Simulator") as demo:
-        gr.Markdown("# 🏢 Cashflow Management Dashboard")
-        
-        with gr.Row():
-            seed_input = gr.Number(value=42, label="Sim Seed", precision=0, scale=1)
-            difficulty_input = gr.Dropdown(choices=["easy", "medium", "hard"], value="medium", label="Difficulty", scale=1)
-            reset_btn = gr.Button("🔄 Reset", variant="secondary", scale=1)
-            ai_btn = gr.Button("🤖 AI Next Step", variant="primary", scale=2)
+    with gr.Blocks(title="Cashflow Simulation") as demo:
+        gr.Markdown("# 🏢 Cashflow Simulation Engine")
 
         with gr.Row():
-            # --- Left: Data View ---
-            with gr.Column(scale=3):
-                status_md = gr.Markdown("### 💰 Financial Status")
-                with gr.Tabs():
-                    with gr.TabItem("📋 Active Invoices"):
-                        invoice_display = gr.Code(label="Debts", language="markdown")
-                    with gr.TabItem("📈 Receivables"):
-                        receivable_display = gr.Code(label="Expected Inflows", language="markdown")
-                
-                with gr.Group():
-                    gr.Markdown("#### 🕹️ Manual Action")
-                    with gr.Row():
-                        target_inv = gr.Dropdown(label="Select Invoice", choices=[], scale=2)
-                        pay_amount = gr.Number(label="Amount (₹)", value=0, scale=1)
-                    
-                    with gr.Row():
-                        pay_btn = gr.Button("Pay Full", variant="stop")
-                        neg_btn = gr.Button("Negotiate", variant="primary")
-                        credit_btn = gr.Button("Draw Credit")
-                        defer_btn = gr.Button("Defer Step")
+            difficulty = gr.Dropdown(
+                choices=["easy", "medium", "hard"],
+                value="medium",
+                label="Difficulty",
+                scale=1,
+            )
+            sim_window = gr.Slider(
+                minimum=7, maximum=30, value=7, step=1,
+                label="Simulation Window (days)",
+                scale=2,
+            )
+            seed = gr.Number(value=0, label="Seed (0 = random)", precision=0, scale=1)
 
-            # --- Right: Intelligence ---
-            with gr.Column(scale=2):
-                memo_md = gr.Markdown("#### 🤖 Advisor Intelligence")
-                world_md = gr.Markdown("#### 🌍 World Events")
-        
-        gr.Markdown("---")
-        history_table = gr.Dataframe(
-            headers=["Step", "Day", "Action", "Amount", "Cash", "Reward", "Reasoning", "Events"],
-            interactive=False
-        )
+        with gr.Tabs():
 
-        # Event handlers
-        demo.load(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        reset_btn.click(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        difficulty_input.change(reset_sim, inputs=[seed_input, difficulty_input], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        ai_btn.click(ai_step, outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        
-        pay_btn.click(lambda id, amt: process_step("pay", id, amt), inputs=[target_inv, pay_amount], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        neg_btn.click(lambda id: process_step("negotiate", id), inputs=[target_inv], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        credit_btn.click(lambda amt: process_step("credit", amount=amt), inputs=[pay_amount], outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
-        defer_btn.click(lambda: process_step("defer"), outputs=[status_md, memo_md, world_md, invoice_display, receivable_display, history_table, target_inv])
+            # ── Tab 1: Full Simulation ──
+            with gr.TabItem("🚀 Full Simulation"):
+                full_run_btn = gr.Button("🚀 Run Full Simulation", variant="primary")
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        full_summary = gr.Markdown("*Click 'Run Full Simulation' to start.*")
+                    with gr.Column(scale=3):
+                        full_chart = gr.Dataframe(
+                            headers=["Day", "Cash", "Reward", "Late Fees"],
+                            label="Day-by-Day Metrics",
+                            interactive=False,
+                        )
+
+                gr.Markdown("---")
+                gr.Markdown("## 📜 Day-by-Day Log")
+                full_log = gr.Markdown("*Logs will appear here after running.*")
+
+                full_run_btn.click(
+                    fn=run_full_simulation,
+                    inputs=[difficulty, sim_window, seed],
+                    outputs=[full_summary, full_log, full_chart],
+                )
+
+            # ── Tab 2: Day-by-Day ──
+            with gr.TabItem("📅 Day-by-Day"):
+                with gr.Row():
+                    start_btn = gr.Button("🎬 Start New", variant="secondary", scale=1)
+                    next_btn = gr.Button("▶ Next Day", variant="primary", scale=2)
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        day_status = gr.Markdown("*Click '🎬 Start New' to initialize, then '▶ Next Day' to step.*")
+                    with gr.Column(scale=3):
+                        day_metrics = gr.Markdown("")
+
+                gr.Markdown("---")
+                gr.Markdown("## 📜 Accumulated Log")
+                day_log_md = gr.Markdown("*Logs will append here as you step through days.*")
+
+                start_btn.click(
+                    fn=start_day_by_day,
+                    inputs=[difficulty, sim_window, seed],
+                    outputs=[day_status, day_metrics, day_log_md],
+                )
+                next_btn.click(
+                    fn=advance_one_day,
+                    outputs=[day_status, day_metrics, day_log_md],
+                )
 
     return demo
 

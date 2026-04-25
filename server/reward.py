@@ -2,46 +2,53 @@
 Reward function for CFO agent training.
 
 Components:
-  + Liquidity preservation (keeping cash)
+  + Liquidity preservation
   + Bill settlement (paying invoices)
-  + Negotiation success (vendor accepts terms)
-  + Shock absorption (surviving hidden events)
   - Late fee penalties
   - Interest penalties
   - Credit usage penalties
 """
 
-
-def compute_reward(cash, late_fee, interest, credit_used, credit_limit, paid, 
-                   is_bankrupt, negotiation_success=False):
+def compute_day_reward(
+    cash: float,
+    invoices_paid: int,
+    late_fees: float,
+    interest: float,
+    credit_used: float,
+    credit_limit: float,
+    overdue_count: int,
+    total_active: int,
+) -> float:
     """
-    High-Stakes Reward for CFO training.
-    Focuses on survival, debt reduction, and avoiding predatory fees.
+    Compute reward for a single day of simulation.
+    Scaled down for smaller numbers.
     """
     # 1. CRITICAL: Bankruptcy Penalty
-    if is_bankrupt or cash < -100000:
-        return -5000.0  # Massive penalty for total failure
+    if cash < -10000:
+        return -500.0
 
-    # 2. Credit Utilization Scaling (Exponential)
-    # Using 10% is fine, using 90% is a crisis
+    # 2. Credit Utilization Penalty
     utilization = credit_used / (credit_limit + 1.0)
-    util_penalty = (utilization ** 2) * 500.0  # Escalates quickly as limit is hit
+    util_penalty = (utilization ** 2) * 50.0
 
     # 3. Liquidity vs Debt Balance
-    # We reward cash, but penalize it if we have late fees (idleness)
-    liquidity_reward = 0.001 * cash if late_fee == 0 else -0.001 * cash
+    liquidity_reward = 0.001 * cash if late_fees == 0 else -0.001 * cash
+
+    # 4. Progress Penalties
+    overdue_penalty = overdue_count * 10.0
+    backlog_penalty = total_active * 2.0
 
     reward = (
-        liquidity_reward                # Reward for healthy cash
-        - 5.0 * late_fee                # Increased penalty for late fees
-        - 2.5 * interest                # Penalty for interest
-        - util_penalty                  # Scaleable credit penalty
-        + 30.0 * paid                   # Incentive for settlement
-        + 25.0 * (1 if negotiation_success else 0) # Successful negotiation
+        liquidity_reward
+        - 2.0 * late_fees
+        - 1.5 * interest
+        - util_penalty
+        - overdue_penalty
+        - backlog_penalty
+        + 100.0 * invoices_paid
     )
 
-    # 4. Success Bonus
-    # Small daily reward for staying alive
+    # Success Bonus (Survival)
     reward += 10.0
 
-    return round(reward, 4)
+    return round(reward, 2)

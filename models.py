@@ -35,6 +35,17 @@ class Receivable(BaseModel):
     probability: float
 
 
+class IncomingInvoice(BaseModel):
+    """An invoice that hasn't arrived yet. The CFO only knows they are coming, not the amount."""
+    id: str
+    vendor_id: str
+    appears_on_day: int
+    hidden_amount: float
+    hidden_due_in: int
+    hidden_late_fee: float
+    hidden_interest: float
+
+
 class VendorProfile(BaseModel):
     id: str
     name: str
@@ -63,7 +74,11 @@ class CashflowmanagerObservation(Observation):
     cash: float
     credit_used: float
     credit_limit: float = 5000.0
-    invoices: List[Invoice]
+    active_invoices: List[Invoice] = Field(default_factory=list)
+    paid_invoices: List[Invoice] = Field(default_factory=list)
+    partially_paid_invoices: List[Invoice] = Field(default_factory=list)
+    overdue_invoices: List[Invoice] = Field(default_factory=list)
+    upcoming_invoice_count: int = 0
     receivables: List[Receivable]
     vendor_profiles: Dict[str, Any] = Field(default_factory=dict)
     advisor_memos: Dict[str, Any] = Field(default_factory=dict)
@@ -84,3 +99,56 @@ class Transition(BaseModel):
     reward: float
     reasoning: str = ""
     next_state_summary: str = ""
+
+
+# ─────────────────────────────────────────────
+# Simulation Engine Data Models
+# ─────────────────────────────────────────────
+
+class DayLog(BaseModel):
+    """Everything that happened on a single day."""
+    day: int
+
+    # State at the start of the day (before any actions)
+    opening_cash: float
+    opening_credit_used: float
+    active_invoice_count: int
+    overdue_invoice_count: int
+
+    # What the advisors said
+    advisor_memos: Dict[str, str] = Field(default_factory=dict)
+
+    # Actions the CFO took
+    actions: List[CashflowmanagerAction] = Field(default_factory=list)
+
+    # Events that happened (incoming invoices activated, receivables collected, etc.)
+    events: List[str] = Field(default_factory=list)
+
+    # State at the end of the day (after all actions and events)
+    closing_cash: float = 0.0
+    closing_credit_used: float = 0.0
+    invoices_paid_today: int = 0
+    late_fees_incurred: float = 0.0
+    interest_incurred: float = 0.0
+    revenue_collected: float = 0.0
+    reward: float = 0.0
+
+
+class SimulationResult(BaseModel):
+    """Output of a complete simulation run."""
+    difficulty: str
+    sim_window: int
+    seed: int
+
+    days: List[DayLog] = Field(default_factory=list)
+
+    # Final summary
+    final_cash: float = 0.0
+    final_credit_used: float = 0.0
+    total_invoices: int = 0
+    invoices_paid: int = 0
+    invoices_overdue: int = 0
+    total_late_fees: float = 0.0
+    total_interest: float = 0.0
+    total_revenue_collected: float = 0.0
+    total_reward: float = 0.0
