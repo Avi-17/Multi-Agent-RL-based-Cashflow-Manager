@@ -23,20 +23,21 @@ def generate_company_profile(difficulty="medium"):
         "revenue_target": 2000000
     }
 
-def generate_vendors(n=5, difficulty="medium"):
+def generate_vendors(n: int = 5, difficulty: str = "medium") -> List[Dict[str, Any]]:
     vendors = []
     names = ["FastLogistics", "GlobalParts", "EnergyCo", "SecureCloud", "ProConsulting"]
     for i in range(min(n, len(names))):
         base_trust = 0.7 if difficulty == "easy" else 0.5 if difficulty == "medium" else 0.3
-        vendors.append({
-            "id": f"v-{i}",
-            "name": names[i],
-            "trust_score": random.uniform(base_trust, base_trust + 0.2),
-            "negotiation_flexibility": random.uniform(0.2, 0.6)
-        })
+        v = VendorProfile(
+            id=f"v-{i}",
+            name=names[i],
+            trust_score=random.uniform(base_trust, base_trust + 0.2),
+            negotiation_flexibility=random.uniform(0.2, 0.6)
+        )
+        vendors.append(v.model_dump())
     return vendors
 
-def generate_invoices(vendors, difficulty="medium"):
+def generate_invoices(vendors: List[Dict[str, Any]], difficulty: str = "medium") -> List[Dict[str, Any]]:
     # Easy: 5 invoices, Medium: 10, Hard: 15
     n = 5 if difficulty == "easy" else 10 if difficulty == "medium" else 15
     invoices = []
@@ -46,32 +47,34 @@ def generate_invoices(vendors, difficulty="medium"):
     
     for _ in range(n):
         vendor = random.choice(vendors)
-        invoices.append({
-            "id": str(uuid4())[:8],
-            "vendor_id": vendor["id"],
-            "amount": random.uniform(50000, 300000) * amt_mult,
-            "due_in": random.randint(1, 10),
-            "late_fee": random.uniform(5000, 20000) * int_mult,
-            "min_payment": random.uniform(10000, 50000),
-            "interest": random.uniform(0.01, 0.05) * int_mult,
-            "status": "unpaid"
-        })
+        inv = Invoice(
+            id=str(uuid4())[:8],
+            vendor_id=vendor["id"],
+            amount=random.uniform(50000, 300000) * amt_mult,
+            due_in=random.randint(1, 10),
+            late_fee=random.uniform(5000, 20000) * int_mult,
+            min_payment=random.uniform(10000, 50000),
+            interest=random.uniform(0.01, 0.05) * int_mult,
+            status="unpaid"
+        )
+        invoices.append(inv.model_dump())
     return invoices
 
-def generate_receivables(difficulty="medium"):
+def generate_receivables(difficulty: str = "medium") -> List[Dict[str, Any]]:
     # Easy: 7 receivables, Medium: 5, Hard: 3
     n = 7 if difficulty == "easy" else 5 if difficulty == "medium" else 3
     receivables = []
     # Hard mode has lower payment probability
     prob_base = 0.85 if difficulty == "easy" else 0.75 if difficulty == "medium" else 0.55
     for i in range(n):
-        receivables.append({
-            "id": f"r-{i}",
-            "customer_id": f"c-{i}",
-            "amount": random.uniform(100000, 500000),
-            "expected_in": random.randint(2, 12),
-            "probability": random.uniform(prob_base, prob_base + 0.1)
-        })
+        rec = Receivable(
+            id=f"r-{i}",
+            customer_id=f"c-{i}",
+            amount=random.uniform(100000, 500000),
+            expected_in=random.randint(2, 12),
+            probability=random.uniform(prob_base, prob_base + 0.1)
+        )
+        receivables.append(rec.model_dump())
     return receivables
 
 def generate_scenario(difficulty="medium"):
