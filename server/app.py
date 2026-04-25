@@ -50,7 +50,27 @@ def run_full_simulation(difficulty: str, sim_window: int, seed: int):
         seed=seed,
     )
     summary, log, chart = _format_result(result)
-    return summary, log, chart
+    return summary, log, chart, seed
+
+def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
+    """Preview the initial state without running."""
+    if not seed or seed <= 0:
+        seed = int(time.time() * 1000) % 100000
+    else:
+        seed = int(seed)
+
+    state, _ = init_simulation(difficulty=difficulty, sim_window=int(sim_window), seed=seed)
+    
+    status = (
+        f"## 🔍 Scenario Preview\n"
+        f"**Difficulty:** {difficulty.upper()} | **Window:** {sim_window} days | **Seed:** {seed}\n\n"
+        f"**Starting Cash:** ₹{state.cash:,.0f} | **Credit Limit:** ₹{state.credit_limit:,.0f}\n\n"
+        f"**Active Invoices:** {len(state.active_invoices)} | "
+        f"**Upcoming Invoices:** {state.upcoming_invoice_count} | "
+        f"**Receivables:** {len(state.receivables)}\n\n"
+        f"*Click **🚀 Run Full Simulation** to execute this scenario.*"
+    )
+    return status, _empty_chart(), "", seed
 
 
 # ═══════════════════════════════════════════════
@@ -85,7 +105,7 @@ def start_day_by_day(difficulty: str, sim_window: int, seed: int):
         f"**Receivables:** {len(_day_state.receivables)}\n\n"
         f"*Click **▶ Next Day** to step through the simulation.*"
     )
-    return status, "", ""
+    return status, "", "", seed
 
 
 def advance_one_day():
@@ -252,74 +272,113 @@ def _format_result(result: SimulationResult):
 # Gradio UI
 # ═══════════════════════════════════════════════
 
+css = """
+.scrollable-logs {
+    max-height: 80vh;
+    overflow-y: auto;
+    border: 1px solid #e5e7eb;
+    padding: 15px;
+    border-radius: 8px;
+    background-color: #f9fafb;
+}
+.dark .scrollable-logs {
+    border-color: #374151;
+    background-color: #1f2937;
+}
+"""
+
 def build_ui():
-    with gr.Blocks(title="Cashflow Simulation") as demo:
+    with gr.Blocks(title="Cashflow Simulation", css=css) as demo:
         gr.Markdown("# 🏢 Cashflow Simulation Engine")
 
         with gr.Row():
-            difficulty = gr.Dropdown(
-                choices=["easy", "medium", "hard"],
-                value="medium",
-                label="Difficulty",
-                scale=1,
-            )
-            sim_window = gr.Slider(
-                minimum=7, maximum=30, value=7, step=1,
-                label="Simulation Window (days)",
-                scale=2,
-            )
-            seed = gr.Number(value=0, label="Seed (0 = random)", precision=0, scale=1)
-
-        with gr.Tabs():
-
-            # ── Tab 1: Full Simulation ──
-            with gr.TabItem("🚀 Full Simulation"):
-                full_run_btn = gr.Button("🚀 Run Full Simulation", variant="primary")
-
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        full_summary = gr.Markdown("*Click 'Run Full Simulation' to start.*")
-                    with gr.Column(scale=3):
-                        full_chart = gr.Dataframe(
-                            headers=["Day", "Cash", "Reward", "Late Fees"],
-                            label="Day-by-Day Metrics",
-                            interactive=False,
-                        )
+            # ── Sidebar (Inputs & Controls) ──
+            with gr.Column(scale=1, variant="panel"):
+                gr.Markdown("### ⚙️ Settings")
+                difficulty = gr.Dropdown(
+                    choices=["easy", "medium", "hard"],
+                    value="medium",
+                    label="Difficulty",
+                )
+                sim_window = gr.Slider(
+                    minimum=7, maximum=30, value=7, step=1,
+                    label="Simulation Window (days)",
+                )
+                seed = gr.Number(value=0, label="Seed (0 = random)", precision=0)
 
                 gr.Markdown("---")
-                gr.Markdown("## 📜 Day-by-Day Log")
-                full_log = gr.Markdown("*Logs will appear here after running.*")
+                gr.Markdown("### 🚀 Actions")
+                
+                gr.Markdown("**Full Simulation**")
+                preview_btn = gr.Button("🔍 Preview Scenario", variant="secondary")
+                full_run_btn = gr.Button("🚀 Run Full Simulation", variant="primary")
+                
+                gr.Markdown("<br>**Day-by-Day**")
+                start_btn = gr.Button("🎬 Start New", variant="secondary", interactive=False)
+                next_btn = gr.Button("▶ Next Day", variant="primary", interactive=False)
 
+            # ── Main Content Area ──
+            with gr.Column(scale=4):
+                with gr.Tabs():
+
+                    # ── Tab 1: Full Simulation ──
+                    with gr.TabItem("🚀 Full Simulation") as tab_full:
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                full_summary = gr.Markdown("*Click 'Run Full Simulation' to start.*")
+                            with gr.Column(scale=1):
+                                full_chart = gr.Dataframe(
+                                    headers=["Day", "Cash", "Reward", "Late Fees"],
+                                    label="Day-by-Day Metrics",
+                                    interactive=False,
+                                )
+
+                    # ── Tab 2: Day-by-Day ──
+                    with gr.TabItem("📅 Day-by-Day") as tab_day:
+                        with gr.Row():
+                            with gr.Column(scale=1):
+                                day_status = gr.Markdown("*Click '🎬 Start New' to initialize, then '▶ Next Day' to step.*")
+                            with gr.Column(scale=1):
+                                day_metrics = gr.Markdown("")
+
+                    # ── Tab 3: Logs ──
+                    with gr.TabItem("📜 Logs") as tab_logs:
+                        with gr.Column(elem_classes="scrollable-logs"):
+                            shared_log_md = gr.Markdown("*Logs will appear here after running a simulation.*")
+
+                # Wire up the events
+                preview_btn.click(
+                    fn=preview_full_simulation,
+                    inputs=[difficulty, sim_window, seed],
+                    outputs=[full_summary, full_chart, shared_log_md, seed],
+                )
+                
                 full_run_btn.click(
                     fn=run_full_simulation,
                     inputs=[difficulty, sim_window, seed],
-                    outputs=[full_summary, full_log, full_chart],
+                    outputs=[full_summary, shared_log_md, full_chart, seed],
                 )
-
-            # ── Tab 2: Day-by-Day ──
-            with gr.TabItem("📅 Day-by-Day"):
-                with gr.Row():
-                    start_btn = gr.Button("🎬 Start New", variant="secondary", scale=1)
-                    next_btn = gr.Button("▶ Next Day", variant="primary", scale=2)
-
-                with gr.Row():
-                    with gr.Column(scale=2):
-                        day_status = gr.Markdown("*Click '🎬 Start New' to initialize, then '▶ Next Day' to step.*")
-                    with gr.Column(scale=3):
-                        day_metrics = gr.Markdown("")
-
-                gr.Markdown("---")
-                gr.Markdown("## 📜 Accumulated Log")
-                day_log_md = gr.Markdown("*Logs will append here as you step through days.*")
 
                 start_btn.click(
                     fn=start_day_by_day,
                     inputs=[difficulty, sim_window, seed],
-                    outputs=[day_status, day_metrics, day_log_md],
+                    outputs=[day_status, day_metrics, shared_log_md, seed],
                 )
                 next_btn.click(
                     fn=advance_one_day,
-                    outputs=[day_status, day_metrics, day_log_md],
+                    outputs=[day_status, day_metrics, shared_log_md],
+                )
+
+                # Tab switching logic for buttons
+                tab_full.select(
+                    fn=lambda: (gr.update(interactive=True), gr.update(interactive=True), gr.update(interactive=False), gr.update(interactive=False)),
+                    inputs=None,
+                    outputs=[preview_btn, full_run_btn, start_btn, next_btn]
+                )
+                tab_day.select(
+                    fn=lambda: (gr.update(interactive=False), gr.update(interactive=False), gr.update(interactive=True), gr.update(interactive=True)),
+                    inputs=None,
+                    outputs=[preview_btn, full_run_btn, start_btn, next_btn]
                 )
 
     return demo
