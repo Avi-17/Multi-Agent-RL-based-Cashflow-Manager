@@ -420,33 +420,3 @@ def _find_invoice(state: State, invoice_id: str):
         if inv.id == invoice_id:
             return inv
     return None
-
-class CashflowmanagerEnvironment:
-    def __init__(self):
-        self.state = None
-        self.incoming = None
-        self.sim_window = 7
-        self.current_step = 0
-
-    def reset(self, seed=42, difficulty="medium"):
-        self.state, self.incoming = init_simulation(
-            difficulty=difficulty,
-            sim_window=self.sim_window,
-            seed=seed,
-        )
-        self.current_step = 0
-        return self.state
-
-    def step(self, action):
-        # Your system is auto-CFO driven, so ignore action
-        day_log = step_one_day(self.state, self.incoming)
-        self.current_step += 1
-
-        done = self.current_step >= self.sim_window
-
-        return {
-            "observation": self.state,
-            "reward": day_log.reward,
-            "done": done,
-            "info": {},
-        }
