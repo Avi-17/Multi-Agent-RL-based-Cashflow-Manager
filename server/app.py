@@ -122,7 +122,7 @@ def advance_one_day():
         return status, _build_metrics_panel(), _format_day_logs(_day_logs)
 
     # Step one day
-    day_log = step_one_day(_day_state, _day_incoming)
+    day_log = step_one_day(_day_state, _day_incoming, _day_logs)
     _day_logs.append(day_log)
 
     # Check if this was the last day
@@ -241,6 +241,14 @@ def _empty_chart():
 # ═══════════════════════════════════════════════
 
 def _format_result(result: SimulationResult):
+    # Build score breakdown string
+    breakdown_str = ""
+    if result.score_breakdown:
+        for dim, val in result.score_breakdown.items():
+            label = dim.replace("_", " ").title()
+            bar = "█" * int(val * 10) + "░" * (10 - int(val * 10))
+            breakdown_str += f"| {label} | {bar} {val:.2f} |\n"
+
     summary = f"""## 📊 Simulation Summary
 | Metric | Value |
 |--------|-------|
@@ -255,7 +263,12 @@ def _format_result(result: SimulationResult):
 | **Total Interest** | ₹{result.total_interest:,.0f} |
 | **Revenue Collected** | ₹{result.total_revenue_collected:,.0f} |
 | **Total Reward** | {result.total_reward:.1f} |
-"""
+
+## 🏆 Agent Score: {result.score:.2f} / 1.00 — Grade: **{result.grade}**
+
+| Dimension | Score |
+|-----------|-------|
+{breakdown_str}"""
 
     log = _format_day_logs(result.days)
 
@@ -306,6 +319,9 @@ def build_ui():
                     label="Simulation Window (days)",
                 )
                 seed = gr.Number(value=0, label="Seed (0 = random)", precision=0)
+                
+                if not os.environ.get("GROQ_API_KEY") and not os.environ.get("USE_LOCAL_HF") == "true":
+                    gr.Markdown("⚠️ *Warning: Neither GROQ_API_KEY nor USE_LOCAL_HF are set. LLM agents may fail.*")
 
                 gr.Markdown("---")
                 gr.Markdown("### 🚀 Actions")

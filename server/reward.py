@@ -1,5 +1,5 @@
 """
-Reward function for CFO agent training.
+Reward function for CFO agent training using OpenEnv Rubrics.
 
 Components:
   + Liquidity preservation
@@ -9,46 +9,74 @@ Components:
   - Credit usage penalties
 """
 
-def compute_day_reward(
-    cash: float,
-    invoices_paid: int,
-    late_fees: float,
-    interest: float,
-    credit_used: float,
-    credit_limit: float,
-    overdue_count: int,
-    total_active: int,
-) -> float:
-    """
-    Compute reward for a single day of simulation.
-    Scaled down for smaller numbers.
-    """
-    # 1. CRITICAL: Bankruptcy Penalty
-    if cash < -10000:
-        return -500.0
+from typing import Any, Dict
+from openenv.core.rubrics.base import Rubric
+from openenv.core.rubrics.containers import WeightedSum
 
-    # 2. Credit Utilization Penalty
-    utilization = credit_used / (credit_limit + 1.0)
-    util_penalty = (utilization ** 2) * 50.0
+class BankruptcyRubric(Rubric):
+    """Heavy penalty for bankruptcy, small bonus for survival."""
+    def forward(self, action: Any, obs: Dict[str, Any]) -> float:
+        day_log = obs["day_log"]
+        if day_log.closing_cash < -10000:
+            return -500.0
+        return 10.0  # Survival bonus
 
-    # 3. Liquidity vs Debt Balance
-    liquidity_reward = 0.001 * cash if late_fees == 0 else -0.001 * cash
+class CreditUtilizationRubric(Rubric):
+    """Penalizes high credit utilization to prevent gaming."""
+    def forward(self, action: Any, obs: Dict[str, Any]) -> float:
+        state = obs["state"]
+        day_log = obs["day_log"]
+        # Credit limit is tracked in the state
+        utilization = day_log.closing_credit_used / (state.credit_limit + 1.0)
+        # Scaled up from 50 to 500 to severely punish maxing out credit just to get invoice bonuses
+        return -(utilization ** 2) * 500.0
 
-    # 4. Progress Penalties
-    overdue_penalty = overdue_count * 10.0
-    backlog_penalty = total_active * 2.0
+class LiquidityRubric(Rubric):
+    """Rewards holding cash, but penalizes it if there are late fees."""
+    def forward(self, action: Any, obs: Dict[str, Any]) -> float:
+        day_log = obs["day_log"]
+        cash = day_log.closing_cash
+        fees = day_log.late_fees_incurred
+        
+        return 0.001 * cash if fees == 0 else -0.001 * cash
 
-    reward = (
-        liquidity_reward
-        - 2.0 * late_fees
-        - 1.5 * interest
-        - util_penalty
-        - overdue_penalty
-        - backlog_penalty
-        + 100.0 * invoices_paid
-    )
+class OperationsRubric(Rubric):
+    """Evaluates the day-to-day operations: fees, interest, and backlog."""
+    def forward(self, action: Any, obs: Dict[str, Any]) -> float:
+        day_log = obs["day_log"]
+        
+        fees = day_log.late_fees_incurred
+        interest = day_log.interest_incurred
+        paid = day_log.invoices_paid_today
+        overdue = day_log.overdue_invoice_count
+        active = day_log.active_invoice_count
 
-    # Success Bonus (Survival)
-    reward += 10.0
+        overdue_penalty = overdue * 10.0
+        backlog_penalty = active * 2.0
+        
+        return (
+            - 2.0 * fees
+            - 1.5 * interest
+            - overdue_penalty
+            - backlog_penalty
+            + 100.0 * paid
+        )
 
-    return round(reward, 2)
+class CashflowRubric(Rubric):
+    """Master rubric orchestrating the scoring system."""
+    def __init__(self):
+        super().__init__()
+        self.composition = WeightedSum(
+            [
+                BankruptcyRubric(), 
+                CreditUtilizationRubric(),
+                LiquidityRubric(),
+                OperationsRubric()
+            ],
+            #WeightedSum requires weights to sum to 1.0.
+            weights=[0.25, 0.25, 0.25, 0.25]
+        )
+        
+    def forward(self, action: Any, obs: Dict[str, Any]) -> float:
+        # we multiply by 4 to preserve the original mathematical magnitude.
+        return round(self.composition(action, obs) * 4.0, 2)

@@ -4,6 +4,7 @@ import random
 import sys
 import torch
 from dotenv import load_dotenv
+import time as _time
 
 try:
     from models import CashflowmanagerAction
@@ -84,8 +85,92 @@ def get_local_model():
         print(f"[HF] Error loading local model: {e}")
         return None, None
 
-def get_model_response(prompt, system_prompt="You are a helpful assistant.", response_format="json"):
+def _sanitize_json_text(text: str) -> str:
+    """
+    Fix common LLM JSON mistakes: evaluate inline math expressions like
+    '45660.0 - 2079.0 - 104.0' into their result '43477.0'.
+    Only evaluates simple arithmetic (+ - * /) for safety.
+    """
+    import re
+    # Match JSON values that contain arithmetic: digits with +, -, *, / operators
+    # e.g.  "field": 45660.0 - 2079.0 - 104.0
+    pattern = r':\s*([\d.]+(?:\s*[+\-*/]\s*[\d.]+)+)'
+    
+    def _eval_match(match):
+        expr = match.group(1)
+        try:
+            # Only allow digits, dots, spaces, and basic operators
+            if re.fullmatch(r'[\d.\s+\-*/]+', expr):
+                result = eval(expr)
+                return f': {result}'
+        except:
+            pass
+        return match.group(0)
+    
+    return re.sub(pattern, _eval_match, text)
+
+
+def _extract_first_json(text: str):
+    """
+    Extract the first complete JSON object or array from text by tracking
+    brace/bracket depth. Handles cases where the model outputs extra text
+    or multiple JSON objects after the first one.
+    """
+    # Find the first { or [
+    start_obj = text.find("{")
+    start_arr = text.find("[")
+    
+    if start_obj == -1 and start_arr == -1:
+        return None
+    
+    # Determine if we're looking for an object or array
+    if start_arr != -1 and (start_obj == -1 or start_arr < start_obj):
+        start = start_arr
+        open_char, close_char = "[", "]"
+    else:
+        start = start_obj
+        open_char, close_char = "{", "}"
+    
+    # Track depth to find matching close
+    depth = 0
+    in_string = False
+    escape_next = False
+    
+    for i in range(start, len(text)):
+        ch = text[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if ch == "\\":
+            escape_next = True
+            continue
+            
+        if ch == '"':
+            in_string = not in_string
+            continue
+        
+        if in_string:
+            continue
+            
+        if ch == open_char:
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0:
+                candidate = text[start:i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+    
+    return None
+
+
+def get_model_response(prompt, system_prompt="You are a helpful assistant.", response_format="json", max_tokens=256):
     """Unified interface to get response from either API or Local HF model."""
+    
     
     if USE_LOCAL_HF:
         model, tokenizer = get_local_model()
@@ -94,144 +179,52 @@ def get_model_response(prompt, system_prompt="You are a helpful assistant.", res
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ]
-            # Format for Llama-3-style chat
             inputs = tokenizer.apply_chat_template(
                 messages, 
                 add_generation_prompt=True, 
                 return_tensors="pt"
             ).to("cuda" if torch.cuda.is_available() else "cpu")
             
-            outputs = model.generate(input_ids=inputs, max_new_tokens=256, temperature=0.1)
+            outputs = model.generate(input_ids=inputs, max_new_tokens=max_tokens, temperature=0.1)
             response_text = tokenizer.decode(outputs[0][len(inputs[0]):], skip_special_tokens=True)
             
-            # Clean up JSON if necessary
             if response_format == "json":
-                try:
-                    # Find first { and last }
-                    start = response_text.find("{")
-                    end = response_text.rfind("}") + 1
-                    if start != -1 and end != -1:
-                        return json.loads(response_text[start:end])
-                except:
-                    pass
+                response_text = _sanitize_json_text(response_text)
+                result = _extract_first_json(response_text)
+                if result is not None:
+                    return result
             return response_text
             
-    # API Mode (Groq/OpenAI)
+    # API Mode (Groq/OpenAI) with retry for rate limits
     client = get_client()
     if client:
-        try:
-            resp = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                model=MODEL_NAME,
-                response_format={"type": "json_object"} if response_format == "json" else None,
-                temperature=0.2,
-                max_tokens=256,
-            )
-            content = resp.choices[0].message.content
-            return json.loads(content) if response_format == "json" else content
-        except Exception as e:
-            print(f"[Client] API Error: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    model=MODEL_NAME,
+                    temperature=0.2,
+                    max_tokens=max_tokens,
+                )
+                content = resp.choices[0].message.content
+                if response_format == "json":
+                    content = _sanitize_json_text(content)
+                    result = _extract_first_json(content)
+                    if result is not None:
+                        return result
+                return content
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate_limit" in error_str:
+                    wait = (attempt + 1) * 4  # 4s, 8s, 12s
+                    print(f"[Client] Rate limited. Waiting {wait}s before retry ({attempt+1}/{max_retries})...")
+                    _time.sleep(wait)
+                    continue
+                print(f"[Client] API Error: {e}")
+                break
     
     return None
-
-_action_cache = {}
-
-def clear_action_cache():
-    global _action_cache
-    _action_cache = {}
-
-def groq_policy(obs, history=None):
-    """CFO Policy — decides actions based on current state."""
-    global _action_cache
-    active_invoices = [inv for inv in obs.invoices if inv.status != "paid"]
-
-    if not active_invoices:
-        if obs.cash < 100000 and obs.credit_used < obs.credit_limit:
-            return CashflowmanagerAction(type="credit", amount=200000.0, memo="Building cash buffer")
-        return CashflowmanagerAction(type="defer", memo="No active invoices")
-
-    day_key = f"{obs.day}_{obs.metadata.get('step', 0)}"
-    if day_key not in _action_cache:
-        _action_cache[day_key] = _cfo_llm_decide(obs, active_invoices)
-
-    return _action_cache[day_key]
-
-def _cfo_llm_decide(obs, invoices):
-    """LLM-powered CFO decision using the unified model interface."""
-    from server.agents import CFO_SYSTEM_PROMPT
-    
-    # Build advisor context
-    advisor_str = "\n".join([f"[{k}]: {v}" for k, v in obs.advisor_messages.items()])
-    inv_str = "\n".join([f"- {inv.id}: ${inv.amount:.0f} due {inv.due_in}d" for inv in invoices[:5]])
-    events_str = "\n".join(obs.world_events) if obs.world_events else "None"
-    neg_str = f"\nLast negotiation: {obs.negotiation_result.vendor_message}" if obs.negotiation_result else ""
-
-    prompt = f"""DAY: {obs.day} | CASH: ₹{obs.cash:.0f} | CREDIT: ₹{obs.credit_used:.0f}/{obs.credit_limit:.0f}
-ADVISOR MEMOS:
-{advisor_str}
-URGENT INVOICES:
-{inv_str}
-WORLD EVENTS: {events_str}{neg_str}
-
-Choose ONE action for the most critical invoice. Respond with JSON only:
-{{"invoice_id": "...", "type": "pay|defer|partial|negotiate|credit", "amount": 0.0, "reasoning": "..."}}"""
-
-    data = get_model_response(prompt, system_prompt=CFO_SYSTEM_PROMPT, response_format="json")
-    
-    if data and isinstance(data, dict):
-        return CashflowmanagerAction(
-            type=data.get("type", "defer"),
-            invoice_id=data.get("invoice_id"),
-            amount=data.get("amount", 0.0),
-            memo=data.get("reasoning", "")
-        )
-    
-    # Rule-based fallback
-    return CashflowmanagerAction(type="defer", invoice_id=invoices[0].id, memo="Fallback defer")
-
-def _cfo_rule_decide(obs, invoices):
-    """
-    Expert Rule-Based CFO for SFT data generation.
-    Prioritizes high-penalty debt and maintains cash buffers.
-    """
-    if not invoices:
-        if obs.cash < 200000 and obs.credit_used < obs.credit_limit:
-            return CashflowmanagerAction(type="credit", amount=500000.0, memo="Low cash: Drawing credit buffer")
-        return CashflowmanagerAction(type="defer", memo="No outstanding liabilities")
-
-    # 1. Check for immediate crises (Debt due today or overdue with high interest)
-    critical_invoices = sorted(
-        [i for i in invoices if i.due_in <= 1 or i.status == "overdue"],
-        key=lambda x: (x.late_fee, x.interest),
-        reverse=True
-    )
-
-    if critical_invoices:
-        inv = critical_invoices[0]
-        if obs.cash >= inv.amount:
-            return CashflowmanagerAction(type="pay", invoice_id=inv.id, amount=inv.amount, memo=f"Paying critical invoice {inv.id} to avoid penalties")
-        elif obs.cash + (obs.credit_limit - obs.credit_used) >= inv.amount:
-            # Draw credit if needed to pay critical debt
-            needed = inv.amount - obs.cash
-            return CashflowmanagerAction(type="credit", amount=max(needed, 500000.0), memo="Drawing credit to pay urgent debt")
-        else:
-            # Can't pay full, try to negotiate or partial
-            return CashflowmanagerAction(type="negotiate", invoice_id=inv.id, memo="Insufficient cash for critical debt: Negotiating extension")
-
-    # 2. Negotiate high-amount future debt to improve terms early
-    large_future_debt = [i for i in invoices if i.amount > 1000000 and i.due_in > 2]
-    if large_future_debt:
-        inv = random.choice(large_future_debt)
-        return CashflowmanagerAction(type="negotiate", invoice_id=inv.id, memo=f"Negotiating large future payment {inv.id} early")
-
-    # 3. Pay smallest invoices to keep vendor count low
-    small_invoices = sorted(invoices, key=lambda x: x.amount)
-    if obs.cash >= small_invoices[0].amount:
-        inv = small_invoices[0]
-        return CashflowmanagerAction(type="pay", invoice_id=inv.id, amount=inv.amount, memo=f"Paying small invoice {inv.id} to simplify ledger")
-
-    return CashflowmanagerAction(type="defer", memo="Preserving cash for upcoming liabilities")
-

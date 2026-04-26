@@ -152,3 +152,8 @@ class SimulationResult(BaseModel):
     total_interest: float = 0.0
     total_revenue_collected: float = 0.0
     total_reward: float = 0.0
+
+    # Normalized evaluation score (0-1)
+    score: float = 0.0
+    score_breakdown: Dict[str, float] = Field(default_factory=dict)
+    grade: str = ""
