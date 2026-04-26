@@ -2,7 +2,6 @@ import os
 import json
 import random
 import sys
-import torch
 from dotenv import load_dotenv
 import time as _time
 
@@ -18,6 +17,13 @@ try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+# torch + transformers are only needed when USE_LOCAL_HF=true. Keep them
+# optional so the production Groq-API path doesn't pull in a multi-GB dep.
+try:
+    import torch
+except ImportError:
+    torch = None
 
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
