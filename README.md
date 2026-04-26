@@ -39,6 +39,7 @@ The dashboard is at <http://0.0.0.0:7860/ui>. OpenEnv endpoints (`/reset`, `/ste
 ---
 
 ## UI navigation
+Gradio UI url - https://bhavishyasahay-cashflow-rl-management.hf.space/ui/
 
 The dashboard has a sidebar (settings + actions) and three tabs in the main panel.
 
@@ -334,3 +335,6 @@ The runtime app uses ICL only. Training scripts live in `scripts/` and are run s
 Set `USE_LOCAL_HF=true` and `LOCAL_MODEL_PATH=...` to point the runtime at a fine-tuned model instead of Groq.
 
 ---
+
+
+## HF space url - https://huggingface.co/spaces/bhavishyasahay/cashflow-RL-management
