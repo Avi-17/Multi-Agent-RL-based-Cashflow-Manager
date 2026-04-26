@@ -28,6 +28,7 @@ app = FastAPI()
 
 _day_state = None          # State object
 _day_incoming = None       # list of IncomingInvoice
+_day_world_model = None    # WorldModel instance for the current day-by-day run
 _day_logs = []             # accumulated DayLog entries
 _day_sim_window = 3        # max days
 _day_seed = 0              # seed used
@@ -61,7 +62,7 @@ def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
     else:
         seed = int(seed)
 
-    state, _ = init_simulation(difficulty=difficulty, sim_window=int(sim_window), seed=seed)
+    state, _, _ = init_simulation(difficulty=difficulty, sim_window=int(sim_window), seed=seed)
     
     status = (
         f"## 🔍 Scenario Preview\n"
@@ -82,14 +83,14 @@ def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
 
 def start_day_by_day(difficulty: str, sim_window: int, seed: int):
     """Initialize a new day-by-day simulation. Does NOT run any days yet."""
-    global _day_state, _day_incoming, _day_logs, _day_sim_window, _day_seed, _day_difficulty
+    global _day_state, _day_incoming, _day_world_model, _day_logs, _day_sim_window, _day_seed, _day_difficulty
 
     if not seed or seed <= 0:
         seed = random.randint(10000, 99999)
     else:
         seed = int(seed)
 
-    _day_state, _day_incoming = init_simulation(
+    _day_state, _day_incoming, _day_world_model = init_simulation(
         difficulty=difficulty,
         sim_window=int(sim_window),
         seed=seed,
@@ -113,7 +114,7 @@ def start_day_by_day(difficulty: str, sim_window: int, seed: int):
 
 def advance_one_day():
     """Step the simulation forward by one day and append the log."""
-    global _day_state, _day_incoming, _day_logs
+    global _day_state, _day_incoming, _day_world_model, _day_logs
 
     if _day_state is None:
         return "⚠️ *No simulation initialized. Click **🎬 Start New** first.*", "", ""
@@ -124,7 +125,7 @@ def advance_one_day():
         return status, _build_metrics_panel(), _format_day_logs(_day_logs)
 
     # Step one day
-    day_log = step_one_day(_day_state, _day_incoming, _day_logs)
+    day_log = step_one_day(_day_state, _day_incoming, _day_logs, _day_world_model)
     _day_logs.append(day_log)
 
     # Check if this was the last day

@@ -19,6 +19,7 @@ from server.agents import (
 )
 from server.reward import CashflowRubric
 from server.scoring import compute_simulation_score
+from server.world_model import WorldModel
 
 
 # Initialize the Rubric system
@@ -40,8 +41,8 @@ def revenue_advisor(state, past_logs=None):
     memo = revenue_agent(state, past_logs or [])
     return format_memo("Revenue", memo)
 
-def risk_advisor(state, past_logs=None):
-    memo = risk_agent(state, past_logs or [])
+def risk_advisor(state, past_logs=None, risk_hints=None):
+    memo = risk_agent(state, past_logs or [], risk_hints=risk_hints)
     result = format_memo("Risk", memo)
     if state.upcoming_invoice_count > 0:
         result += f"\n📋 {state.upcoming_invoice_count} invoices are coming soon. Maintain a cash buffer."
@@ -124,10 +125,18 @@ def init_simulation(
 
     incoming_invoices = [IncomingInvoice(**inc) for inc in scenario["incoming_invoices"]]
 
-    return state, incoming_invoices
+    world_model = WorldModel()
+    world_model.initialize(scenario, sim_window=sim_window)
+
+    return state, incoming_invoices, world_model
 
 
-def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_logs: List[DayLog] = None) -> DayLog:
+def step_one_day(
+    state: State,
+    incoming_invoices: List[IncomingInvoice],
+    past_logs: List[DayLog] = None,
+    world_model: WorldModel = None,
+) -> DayLog:
     day = state.day + 1
     state.day = day
     if past_logs is None:
@@ -160,6 +169,10 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
     day_log.advisor_memos = {}
     fast_actions = _try_fast_path(state)
 
+    # Risk hints from the world model (partial info: market stress + upcoming
+    # threat level). Risk Agent uses these to flag elevated/critical days.
+    risk_hints = world_model.get_risk_hints(day) if world_model else None
+
     if fast_actions is not None:
         # Fast path — trivially simple day, skip ALL API calls
         day_log.advisor_memos["Routing"] = "[FAST_PATH] Simple state — rule-based actions, no LLM needed."
@@ -175,7 +188,7 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
             futures = {
                 "Expenditure": executor.submit(expenditure_advisor, state, past_logs),
                 "Revenue": executor.submit(revenue_advisor, state, past_logs),
-                "Risk": executor.submit(risk_advisor, state, past_logs),
+                "Risk": executor.submit(risk_advisor, state, past_logs, risk_hints),
             }
             for name, future in futures.items():
                 try:
@@ -192,11 +205,17 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
     day_log.late_fees_incurred += fees
     day_log.interest_incurred = interest
 
+    # World events fire AFTER actions (per WorldModel docstring): the agent
+    # decides without seeing tomorrow's shock. Events apply on every day —
+    # fast_path or full_path — they are world physics, independent of routing.
+    if world_model is not None:
+        _apply_world_effects(state, world_model, day, day_log)
+
     obs = {
         "state": state,
         "day_log": day_log
     }
-    
+
     day_log.reward = reward_rubric(
         action=day_log.actions,
         observation=obs
@@ -208,12 +227,43 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
     return day_log
 
 
+def _apply_world_effects(state: State, world_model: WorldModel, day: int, day_log: DayLog):
+    """Trigger world events for the day and apply their effects to state."""
+    effects = world_model.update(day)
+
+    # Cash deltas (shocks, fraud). Floor at -credit_limit so we don't go past
+    # the bankruptcy threshold from a single shock alone.
+    if effects["cash_delta"]:
+        delta = effects["cash_delta"]
+        floor = -state.credit_limit
+        new_cash = max(state.cash + delta, floor)
+        state.cash = new_cash
+
+    # Receivable delays — bump expected_in for matching receivables still pending.
+    if effects["payment_delays"]:
+        for rec_id, extra_days in effects["payment_delays"]:
+            for rec in state.receivables:
+                if rec.id == rec_id:
+                    rec.expected_in += int(extra_days)
+                    break
+
+    # Surface every triggered event to the day log so it shows in the UI.
+    for evt in effects["events_triggered"]:
+        icon = {
+            "cash_shock":   "⚡",
+            "fraud":        "🚨",
+            "payment_delay": "⏳",
+            "revenue_miss": "📉",
+        }.get(evt["type"], "🌍")
+        day_log.events.append(f"{icon} WORLD EVENT [{evt['type']}]: {evt['description']}")
+
+
 def run_simulation(
     difficulty: str = "medium",
     sim_window: int = 3,
     seed: int = 42,
 ) -> SimulationResult:
-    state, incoming_invoices = init_simulation(difficulty, sim_window, seed)
+    state, incoming_invoices, world_model = init_simulation(difficulty, sim_window, seed)
 
     result = SimulationResult(
         difficulty=difficulty,
@@ -225,7 +275,7 @@ def run_simulation(
     past_logs = []
 
     for _ in range(sim_window):
-        day_log = step_one_day(state, incoming_invoices, past_logs)
+        day_log = step_one_day(state, incoming_invoices, past_logs, world_model)
         result.days.append(day_log)
         past_logs.append(day_log)
         total_reward += day_log.reward
