@@ -29,7 +29,7 @@ app = FastAPI()
 _day_state = None          # State object
 _day_incoming = None       # list of IncomingInvoice
 _day_logs = []             # accumulated DayLog entries
-_day_sim_window = 7        # max days
+_day_sim_window = 3        # max days
 _day_seed = 0              # seed used
 _day_difficulty = "medium"
 
@@ -40,8 +40,9 @@ _day_difficulty = "medium"
 
 def run_full_simulation(difficulty: str, sim_window: int, seed: int):
     """Run all days in one shot and return formatted results."""
+    # Always generate a fresh seed unless user explicitly set one
     if not seed or seed <= 0:
-        seed = int(time.time() * 1000) % 100000
+        seed = random.randint(10000, 99999)
     else:
         seed = int(seed)
 
@@ -51,12 +52,12 @@ def run_full_simulation(difficulty: str, sim_window: int, seed: int):
         seed=seed,
     )
     summary, log, chart = _format_result(result)
-    return summary, log, chart, seed
+    return summary, log, chart, 0  # Reset seed to 0 so next click generates new data
 
 def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
     """Preview the initial state without running."""
     if not seed or seed <= 0:
-        seed = int(time.time() * 1000) % 100000
+        seed = random.randint(10000, 99999)
     else:
         seed = int(seed)
 
@@ -71,7 +72,7 @@ def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
         f"**Receivables:** {len(state.receivables)}\n\n"
         f"*Click **🚀 Run Full Simulation** to execute this scenario.*"
     )
-    return status, _empty_chart(), "", seed
+    return status, _empty_chart(), "", 0  # Reset seed to 0
 
 
 # ═══════════════════════════════════════════════
@@ -83,7 +84,7 @@ def start_day_by_day(difficulty: str, sim_window: int, seed: int):
     global _day_state, _day_incoming, _day_logs, _day_sim_window, _day_seed, _day_difficulty
 
     if not seed or seed <= 0:
-        seed = int(time.time() * 1000) % 100000
+        seed = random.randint(10000, 99999)
     else:
         seed = int(seed)
 
@@ -106,7 +107,7 @@ def start_day_by_day(difficulty: str, sim_window: int, seed: int):
         f"**Receivables:** {len(_day_state.receivables)}\n\n"
         f"*Click **▶ Next Day** to step through the simulation.*"
     )
-    return status, "", "", seed
+    return status, "", "", 0  # Reset seed to 0
 
 
 def advance_one_day():
@@ -122,12 +123,37 @@ def advance_one_day():
         return status, _build_metrics_panel(), _format_day_logs(_day_logs)
 
     # Step one day
-    day_log = step_one_day(_day_state, _day_incoming)
+    day_log = step_one_day(_day_state, _day_incoming, _day_logs)
     _day_logs.append(day_log)
 
     # Check if this was the last day
     if current_day >= _day_sim_window:
-        status = _build_status_panel() + "\n\n## 🏁 Simulation Complete!"
+        status = _build_status_panel() + "\n\n## 🏁 Simulation Complete!\n\n"
+        
+        # Calculate final score
+        from server.scoring import compute_simulation_score
+        result = SimulationResult(
+            difficulty=_day_difficulty,
+            sim_window=_day_sim_window,
+            seed=0,
+        )
+        result.days = _day_logs
+        result.final_cash = _day_state.cash
+        result.final_credit_used = _day_state.credit_used
+        result.invoices_paid = len(_day_state.paid_invoices)
+        result.invoices_overdue = len(_day_state.overdue_invoices)
+        result.total_invoices = result.invoices_paid + len(_day_state.active_invoices)
+        result.total_late_fees = sum(d.late_fees_incurred for d in result.days)
+        result.total_interest = sum(d.interest_incurred for d in result.days)
+        result.total_revenue_collected = sum(d.revenue_collected for d in result.days)
+        result.total_reward = round(sum(d.reward for d in result.days), 2)
+        
+        eval_result = compute_simulation_score(result)
+        result.score = eval_result["score"]
+        result.score_breakdown = eval_result["breakdown"]
+        result.grade = eval_result["grade"]
+        
+        status += _format_result(result)
     else:
         status = _build_status_panel()
 
@@ -241,6 +267,14 @@ def _empty_chart():
 # ═══════════════════════════════════════════════
 
 def _format_result(result: SimulationResult):
+    # Build score breakdown string
+    breakdown_str = ""
+    if result.score_breakdown:
+        for dim, val in result.score_breakdown.items():
+            label = dim.replace("_", " ").title()
+            bar = "█" * int(val * 10) + "░" * (10 - int(val * 10))
+            breakdown_str += f"| {label} | {bar} {val:.2f} |\n"
+
     summary = f"""## 📊 Simulation Summary
 | Metric | Value |
 |--------|-------|
@@ -255,7 +289,12 @@ def _format_result(result: SimulationResult):
 | **Total Interest** | ₹{result.total_interest:,.0f} |
 | **Revenue Collected** | ₹{result.total_revenue_collected:,.0f} |
 | **Total Reward** | {result.total_reward:.1f} |
-"""
+
+## 🏆 Agent Score: {result.score:.2f} / 1.00 — Grade: **{result.grade}**
+
+| Dimension | Score |
+|-----------|-------|
+{breakdown_str}"""
 
     log = _format_day_logs(result.days)
 
@@ -301,11 +340,11 @@ def build_ui():
                     value="medium",
                     label="Difficulty",
                 )
-                sim_window = gr.Slider(
-                    minimum=7, maximum=30, value=7, step=1,
-                    label="Simulation Window (days)",
-                )
+                sim_window = gr.Number(value=3, visible=False)
                 seed = gr.Number(value=0, label="Seed (0 = random)", precision=0)
+                
+                if not os.environ.get("GROQ_API_KEY") and not os.environ.get("USE_LOCAL_HF") == "true":
+                    gr.Markdown("⚠️ *Warning: Neither GROQ_API_KEY nor USE_LOCAL_HF are set. LLM agents may fail.*")
 
                 gr.Markdown("---")
                 gr.Markdown("### 🚀 Actions")

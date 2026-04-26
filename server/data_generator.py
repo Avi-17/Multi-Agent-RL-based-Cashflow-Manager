@@ -26,7 +26,7 @@ def generate_vendors(difficulty: str = "medium") -> List[Dict[str, Any]]:
     return vendors
 
 
-def generate_scenario(difficulty: str = "medium", sim_window: int = 7, seed: int = 42) -> Dict[str, Any]:
+def generate_scenario(difficulty: str = "medium", sim_window: int = 3, seed: int = 42) -> Dict[str, Any]:
     """
     Generate a complete scenario for the simulation.
     """
@@ -108,7 +108,7 @@ def _generate_invoices(n: int, difficulty: str, sim_window: int, vendors: List[D
             interest = round(random.uniform(0.01, 0.02), 3)
         elif difficulty == "hard":
             amount = random.randint(5, 12) * 1000
-            due_in = random.randint(0, 1)
+            due_in = random.randint(1, 2)  # At least 1 day to react
             late_fee = random.randint(300, 800)
             interest = round(random.uniform(0.04, 0.10), 3)
         else:  # medium
