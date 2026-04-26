@@ -1,13 +1,21 @@
 """
 Core Simulation Engine.
+
+Public API (importable from this module):
+    - CashflowmanagerEnvironment: openenv-compatible Environment class
+    - CashflowmanagerAction:      action type (re-exported from models)
+    - CashflowmanagerObservation: observation type (re-exported from models)
+    - init_simulation, step_one_day, run_simulation: module-level helpers
+      retained for the Gradio dashboard's full-day orchestration flow.
 """
 
 import random
 import os
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from models import (
+    CashflowmanagerObservation,
     CashflowmanagerObservation as State,
     Invoice, Receivable, IncomingInvoice,
     CashflowmanagerAction, DayLog, SimulationResult,
@@ -21,14 +29,24 @@ from server.reward import CashflowRubric
 from server.scoring import compute_simulation_score
 from server.world_model import WorldModel
 
+from openenv.core.env_server.interfaces import Environment
+from openenv.core.env_server.types import State as EnvState
 
-# Initialize the Rubric system
+__all__ = [
+    "CashflowmanagerEnvironment",
+    "CashflowmanagerAction",
+    "CashflowmanagerObservation",
+    "init_simulation",
+    "step_one_day",
+    "run_simulation",
+]
+
+
+# Initialize the Reward Rubric system
 reward_rubric = CashflowRubric()
 CFO_CONFIDENCE_THRESHOLD = float(os.environ.get("CFO_CONFIDENCE_THRESHOLD", "0.85"))
 
-# ─────────────────────────────────────────────
 # Advisors & CFO Wrappers
-# ─────────────────────────────────────────────
 
 def expenditure_advisor(state, past_logs=None):
     memo = expenditure_agent(state, past_logs or [])
@@ -49,9 +67,7 @@ def risk_advisor(state, past_logs=None, risk_hints=None):
     return result
 
 
-# ─────────────────────────────────────────────
 # Heuristic Fast Path (no API call)
-# ─────────────────────────────────────────────
 
 def _try_fast_path(state: State):
     """
@@ -67,20 +83,19 @@ def _try_fast_path(state: State):
     unpaid = [inv for inv in state.active_invoices if inv.status != "paid"]
     
     if not unpaid:
-        return []  # Nothing to do
+        return [] 
     
     overdue = [inv for inv in unpaid if inv.due_in < 0]
     if overdue:
-        return None  # Complex — need LLM
+        return None
 
     total_owed = sum(inv.amount for inv in unpaid)
     if total_owed > state.cash:
-        return None  # Not enough cash to pay everything — need LLM to prioritize
+        return None 
 
     if len(unpaid) > 3:
-        return None  # Too many invoices — need LLM
+        return None 
 
-    # Simple case: pay invoices due soon, defer the rest
     actions = []
     remaining_cash = state.cash
     for inv in sorted(unpaid, key=lambda x: x.due_in):
@@ -98,9 +113,6 @@ def _try_fast_path(state: State):
     return actions
 
 
-# ─────────────────────────────────────────────
-# Core Engine
-# ─────────────────────────────────────────────
 
 def init_simulation(
     difficulty: str = "medium",
@@ -168,9 +180,6 @@ def step_one_day(
     # Step 1: Evaluate state complexity heuristically (NO API call)
     day_log.advisor_memos = {}
     fast_actions = _try_fast_path(state)
-
-    # Risk hints from the world model (partial info: market stress + upcoming
-    # threat level). Risk Agent uses these to flag elevated/critical days.
     risk_hints = world_model.get_risk_hints(day) if world_model else None
 
     if fast_actions is not None:
@@ -178,10 +187,7 @@ def step_one_day(
         day_log.advisor_memos["Routing"] = "[FAST_PATH] Simple state — rule-based actions, no LLM needed."
         day_log.actions = fast_actions
     else:
-        # Complex day — run the three advisors in parallel on separate API keys
-        # (see EXPENDITURE/REVENUE/RISK_KEY_INDEX in agents.py). Each advisor
-        # hits its own TPM bucket, so concurrency doesn't cause rate-limit
-        # contention. CFO runs sequentially after, on the Risk key.
+        # Complex day
         day_log.advisor_memos["Routing"] = "[FULL_PATH] Complex state — consulting advisors (parallel) + CFO."
 
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -205,9 +211,7 @@ def step_one_day(
     day_log.late_fees_incurred += fees
     day_log.interest_incurred = interest
 
-    # World events fire AFTER actions (per WorldModel docstring): the agent
-    # decides without seeing tomorrow's shock. Events apply on every day —
-    # fast_path or full_path — they are world physics, independent of routing.
+    # World events fire AFTER actions
     if world_model is not None:
         _apply_world_effects(state, world_model, day, day_log)
 
@@ -231,15 +235,12 @@ def _apply_world_effects(state: State, world_model: WorldModel, day: int, day_lo
     """Trigger world events for the day and apply their effects to state."""
     effects = world_model.update(day)
 
-    # Cash deltas (shocks, fraud). Floor at -credit_limit so we don't go past
-    # the bankruptcy threshold from a single shock alone.
     if effects["cash_delta"]:
         delta = effects["cash_delta"]
         floor = -state.credit_limit
         new_cash = max(state.cash + delta, floor)
         state.cash = new_cash
 
-    # Receivable delays — bump expected_in for matching receivables still pending.
     if effects["payment_delays"]:
         for rec_id, extra_days in effects["payment_delays"]:
             for rec in state.receivables:
@@ -247,7 +248,6 @@ def _apply_world_effects(state: State, world_model: WorldModel, day: int, day_lo
                     rec.expected_in += int(extra_days)
                     break
 
-    # Surface every triggered event to the day log so it shows in the UI.
     for evt in effects["events_triggered"]:
         icon = {
             "cash_shock":   "⚡",
@@ -290,7 +290,6 @@ def run_simulation(
     result.total_revenue_collected = sum(d.revenue_collected for d in result.days)
     result.total_reward = round(total_reward, 2)
 
-    # Compute normalized evaluation score
     eval_result = compute_simulation_score(result)
     result.score = eval_result["score"]
     result.score_breakdown = eval_result["breakdown"]
@@ -460,3 +459,117 @@ def _find_invoice(state: State, invoice_id: str):
         if inv.id == invoice_id:
             return inv
     return None
+
+
+# openenv Environment class
+
+class CashflowmanagerEnvironment(
+    Environment[CashflowmanagerAction, CashflowmanagerObservation, EnvState]
+):
+
+    SUPPORTS_CONCURRENT_SESSIONS: bool = False
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._sim_state: Optional[CashflowmanagerObservation] = None
+        self._incoming: List[IncomingInvoice] = []
+        self._world_model: Optional[WorldModel] = None
+        self._past_logs: List[DayLog] = []
+        self._episode_id: Optional[str] = None
+        self._step_count: int = 0
+        self._sim_window: int = 3
+        self._difficulty: str = "medium"
+
+    def reset(
+        self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> CashflowmanagerObservation:
+        difficulty = kwargs.get("difficulty", "medium")
+        sim_window = int(kwargs.get("sim_window", 3))
+        seed_val = int(seed) if seed is not None else 42
+
+        self._sim_state, self._incoming, self._world_model = init_simulation(
+            difficulty=difficulty,
+            sim_window=sim_window,
+            seed=seed_val,
+        )
+        self._episode_id = episode_id or f"ep-{seed_val}"
+        self._step_count = 0
+        self._past_logs = []
+        self._sim_window = sim_window
+        self._difficulty = difficulty
+        self._sim_state.done = False
+        self._sim_state.reward = 0.0
+        return self._sim_state
+
+    def step(
+        self,
+        action: CashflowmanagerAction,
+        timeout_s: Optional[float] = None,
+        **kwargs: Any,
+    ) -> CashflowmanagerObservation:
+        if self._sim_state is None:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+
+        temp_log = DayLog(
+            day=self._sim_state.day,
+            opening_cash=self._sim_state.cash,
+            opening_credit_used=self._sim_state.credit_used,
+            active_invoice_count=len(self._sim_state.active_invoices),
+            overdue_invoice_count=len(self._sim_state.overdue_invoices),
+        )
+        _apply_actions(self._sim_state, [action], temp_log)
+
+        obs_dict = {"state": self._sim_state, "day_log": temp_log}
+        try:
+            reward = float(reward_rubric(action=[action], observation=obs_dict))
+        except Exception:
+            reward = 0.0
+        self._sim_state.reward = reward
+
+        unpaid = any(inv.status != "paid" for inv in self._sim_state.active_invoices)
+        self._sim_state.done = (
+            self._sim_state.day >= self._sim_window and not unpaid
+        )
+
+        self._step_count += 1
+        return self._sim_state
+
+    @property
+    def state(self) -> EnvState:
+        return EnvState(
+            episode_id=self._episode_id,
+            step_count=self._step_count,
+        )
+
+
+    def advance_day(self) -> DayLog:
+        """Advance one full simulation day, running advisors and CFO.
+
+        Useful for openenv clients that want the high-level multi-agent flow
+        instead of fine-grained single-action steps. Mutates `self._sim_state`.
+        """
+        if self._sim_state is None:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+        day_log = step_one_day(
+            self._sim_state,
+            self._incoming,
+            self._past_logs,
+            self._world_model,
+        )
+        self._past_logs.append(day_log)
+        return day_log
+
+    def get_metadata(self):
+        from openenv.core.env_server.types import EnvironmentMetadata
+        return EnvironmentMetadata(
+            name="cashflowmanager",
+            description=(
+                "Multi-agent cashflow management simulation. The CFO receives "
+                "memos from Expenditure / Revenue / Risk advisors and decides "
+                "pay/defer/partial/credit actions per invoice."
+            ),
+            version="1.0.0",
+        )

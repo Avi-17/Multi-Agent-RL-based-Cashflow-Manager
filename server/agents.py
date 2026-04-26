@@ -25,19 +25,11 @@ REVENUE_MODEL = os.environ.get("REVENUE_MODEL_NAME") or os.environ.get("ADVISOR_
 RISK_MODEL = os.environ.get("RISK_MODEL_NAME") or os.environ.get("ADVISOR_MODEL_NAME") or "llama-3.1-8b-instant"
 CFO_MODEL = os.environ.get("CFO_MODEL_NAME") or DEFAULT_CFO_MODEL
 
-# Per-agent API key indices. With 3 keys in GROQ_API_KEYS, advisors get distinct
-# keys (one each) so their parallel calls don't share a TPM bucket. CFO reuses
-# the Risk key (index 2) since Risk has the smallest prompt -> most TPM headroom
-# left, and CFO runs after advisors finish so there's no concurrent contention.
 EXPENDITURE_KEY_INDEX = int(os.environ.get("EXPENDITURE_KEY_INDEX", "0"))
 REVENUE_KEY_INDEX = int(os.environ.get("REVENUE_KEY_INDEX", "1"))
 RISK_KEY_INDEX = int(os.environ.get("RISK_KEY_INDEX", "2"))
 CFO_KEY_INDEX = int(os.environ.get("CFO_KEY_INDEX", "2"))
 
-
-# ═══════════════════════════════════════════════════════
-# SYSTEM PROMPTS (with Few-Shot & CoT)
-# ═══════════════════════════════════════════════════════
 
 EXPENDITURE_SYSTEM_PROMPT = """You are the Expenditure Agent for a company's finance team.
 Your role: Analyze all unpaid invoices and advise the CFO on payment priority.
@@ -195,18 +187,11 @@ def _calibrate_confidence(state, actions: List[CashflowmanagerAction], model_con
     )
     heuristic = max(0.0, min(heuristic, 1.0))
 
-    # Blend model confidence with action-quality confidence; this avoids flat 0.90 every day.
     blended = 0.45 * max(0.0, min(model_confidence, 1.0)) + 0.55 * heuristic
     return max(0.05, min(blended, 0.98))
 
 
-# ═══════════════════════════════════════════════════════
-# ICL AGENT IMPLEMENTATIONS
-# ═══════════════════════════════════════════════════════
-
 def expenditure_agent(state, past_logs: list) -> Dict[str, Any]:
-    # Plan B: advisors skip history (CFO still gets it); state is minimal since
-    # the invoice list below already covers what this agent needs.
     state_text = serialize_state_minimal(state)
 
     inv_lines = []
@@ -236,7 +221,7 @@ Analyze these invoices and provide your memo."""
     if data and isinstance(data, dict) and ("recommended_action" in data or "recommendation" in data):
         return data
 
-    # Safe Fallback
+    # Fallback
     return {
         "thought_process": "Fallback triggered.",
         "priority_list": [],
@@ -274,7 +259,7 @@ Project cash inflows and provide your memo."""
     if data and isinstance(data, dict) and "recommendation" in data:
         return data
 
-    # Safe Fallback
+    # Fallback
     return {
         "thought_process": "Fallback triggered.",
         "total_expected_inflow": 0.0,
@@ -292,9 +277,7 @@ def risk_agent(state, past_logs: list, risk_hints: Dict[str, Any] = None) -> Dic
     total_debt = sum(inv.amount for inv in state.active_invoices)
     credit_util = state.credit_used / (state.credit_limit + 1.0)
 
-    # Optional partial info from the world model: market_stress in [0,1] and a
-    # qualitative upcoming_risk_level. Used as additional signal for the agent;
-    # exact event amounts/days remain hidden.
+    # Optional partial info from the world model
     market_context = ""
     if risk_hints:
         stress = risk_hints.get("market_stress", 0.0)
@@ -325,7 +308,7 @@ Assess financial risk and provide your memo."""
     if data and isinstance(data, dict) and "risk_level" in data:
         return data
 
-    # Safe Fallback
+    # Fallback
     return {
         "thought_process": "Fallback triggered.",
         "risk_level": "moderate",
@@ -398,7 +381,7 @@ Credit available: ₹{state.credit_limit - state.credit_used:,.0f}."""
                 "fallback": False,
             }
 
-    # Safe Fallback
+    # Fallback
     print(f"[ICL CFO] LLM response invalid (got: {str(data)[:200]}), falling back to safe defer.")
     return {
         "actions": [
@@ -414,9 +397,7 @@ def cfo_decide(state, advisor_memos: Dict[str, str], past_logs: list) -> list:
     return cfo_decide_with_metadata(state, advisor_memos, past_logs)["actions"]
 
 
-# ═══════════════════════════════════════════════════════
-# CONVENIENCE FORMATTER
-# ═══════════════════════════════════════════════════════
+#FORMATTER
 
 def format_memo(agent_name: str, memo: Dict[str, Any]) -> str:
     """Convert structured memo to a human-readable string for the observation."""

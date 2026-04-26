@@ -36,7 +36,6 @@ API_KEY = os.environ.get("GROQ_API_KEY") or os.environ.get("API_KEY")
 # Global instances for local model
 _local_model = None
 _local_tokenizer = None
-# Per-key-index OpenAI client cache: {key_index: client}
 _clients: dict = {}
 
 

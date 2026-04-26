@@ -31,10 +31,7 @@ def _solvency_score(result: SimulationResult) -> float:
     """
     if result.final_cash < -10_000:
         return 0.0
-
-    # Survived — now grade based on final cash health
-    # Clamp between 0 and a reasonable upper bound
-    max_healthy_cash = 50_000  # Upper anchor: having ₹50k+ is "perfect"
+    max_healthy_cash = 50_000 
     cash_ratio = max(0.0, result.final_cash) / max_healthy_cash
     return 0.3 + 0.7 * min(1.0, cash_ratio)
 
@@ -46,7 +43,7 @@ def _debt_clearance_score(result: SimulationResult) -> float:
     """
     total = result.total_invoices
     if total == 0:
-        return 1.0  # No invoices = nothing to fail on
+        return 1.0
     return result.invoices_paid / total
 
 
@@ -63,9 +60,6 @@ def _fiscal_discipline_score(result: SimulationResult) -> float:
     if total_penalties <= 0:
         return 1.0
 
-    # Calibrate: what's the worst-case penalty budget?
-    # On hard mode, penalties can easily reach ₹5,000–10,000 over 7 days.
-    # On easy mode, they rarely exceed ₹1,000.
     budget_map = {"easy": 2_000, "medium": 5_000, "hard": 10_000}
     budget = budget_map.get(result.difficulty, 5_000)
 
@@ -83,14 +77,9 @@ def _credit_prudence_score(result: SimulationResult) -> float:
     if result.final_credit_used <= 0:
         return 1.0
 
-    # Find credit limit from the first day's state
-    # We approximate from final values
-    # Credit limit isn't stored in SimulationResult, so estimate from days
-    credit_limit = 10_000  # Default
+    credit_limit = 10_000 
     if result.days:
         first_day = result.days[0]
-        # opening_credit_used is 0 on day 1, so we infer limit from patterns
-        # Use a heuristic: final_credit_used can't exceed the limit
         credit_limit = max(credit_limit, result.final_credit_used * 1.1)
 
     utilization = min(1.0, result.final_credit_used / (credit_limit + 1.0))
@@ -110,7 +99,6 @@ def _cash_management_score(result: SimulationResult) -> float:
     starting_cash = result.days[0].opening_cash
 
     if starting_cash <= 0:
-        # Edge case: started with nothing
         return 1.0 if result.final_cash > 0 else 0.0
 
     if result.final_cash <= 0:
@@ -121,9 +109,6 @@ def _cash_management_score(result: SimulationResult) -> float:
     return min(1.0, ratio)
 
 
-# ═══════════════════════════════════════════════════════
-# Master Scoring Function
-# ═══════════════════════════════════════════════════════
 
 # Weights for each dimension (sum to 1.0)
 SCORE_WEIGHTS = {
