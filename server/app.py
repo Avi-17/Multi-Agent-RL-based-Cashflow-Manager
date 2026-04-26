@@ -15,29 +15,41 @@ import pandas as pd
 import time
 import random
 
-from server.cashflowmanager_environment import run_simulation, init_simulation, step_one_day
-from server.cashflowmanager_environment import CashflowmanagerAction
+from openenv.core.env_server.http_server import create_app
+from server.cashflowmanager_environment import (
+    CashflowmanagerEnvironment,
+    CashflowmanagerAction,
+    CashflowmanagerObservation,
+    run_simulation,
+    init_simulation,
+    step_one_day,
+)
 from models import SimulationResult, DayLog
 
-# Initialize FastAPI app for mounting Gradio
-app = FastAPI()
+# Build the FastAPI app via openenv's `create_app`. This wires the env's
+# reset/step/state endpoints automatically. The Gradio dashboard mounts on
+# top of this app at /ui (see bottom of file).
+app: FastAPI = create_app(
+    CashflowmanagerEnvironment,
+    CashflowmanagerAction,
+    CashflowmanagerObservation,
+    env_name="cashflowmanager",
+    max_concurrent_envs=1,
+)
 
-# ═══════════════════════════════════════════════
-# Day-by-Day state (persisted between button clicks)
-# ═══════════════════════════════════════════════
 
-_day_state = None          # State object
-_day_incoming = None       # list of IncomingInvoice
-_day_world_model = None    # WorldModel instance for the current day-by-day run
-_day_logs = []             # accumulated DayLog entries
-_day_sim_window = 3        # max days
-_day_seed = 0              # seed used
+# Day-by-Day state (persisted)
+_day_state = None
+_day_incoming = None 
+_day_world_model = None
+_day_logs = [] 
+_day_sim_window = 3 
+_day_seed = 0
 _day_difficulty = "medium"
 
 
-# ═══════════════════════════════════════════════
-# MODE 1: Full Simulation (run all days at once)
-# ═══════════════════════════════════════════════
+
+# Full Simulation (run all days at once)
 
 def run_full_simulation(difficulty: str, sim_window: int, seed: int):
     """Run all days in one shot and return formatted results."""
@@ -52,7 +64,6 @@ def run_full_simulation(difficulty: str, sim_window: int, seed: int):
         seed=seed,
     )
     summary, log, chart, right_panel = _format_result(result)
-    # Outputs in fixed order: summary, log, chart, right_panel, seed
     return summary, log, chart, right_panel, 0
 
 def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
@@ -73,13 +84,11 @@ def preview_full_simulation(difficulty: str, sim_window: int, seed: int):
         f"**Receivables:** {len(state.receivables)}\n\n"
         f"*Click **🚀 Run Full Simulation** to execute this scenario.*"
     )
-    # outputs: full_summary, full_chart, shared_log_md, full_right_panel, seed
     return status, _empty_chart(), "", "", 0
 
 
-# ═══════════════════════════════════════════════
-# MODE 2: Day-by-Day Simulation
-# ═══════════════════════════════════════════════
+
+# Day-by-Day Simulation
 
 def start_day_by_day(difficulty: str, sim_window: int, seed: int):
     """Initialize a new day-by-day simulation. Does NOT run any days yet."""
@@ -109,8 +118,7 @@ def start_day_by_day(difficulty: str, sim_window: int, seed: int):
         f"**Receivables:** {len(_day_state.receivables)}\n\n"
         f"*Click **▶ Next Day** to step through the simulation.*"
     )
-    return status, "", "", 0  # Reset seed to 0
-
+    return status, "", "", 0 
 
 def advance_one_day():
     """Step the simulation forward by one day and append the log."""
@@ -128,9 +136,7 @@ def advance_one_day():
     day_log = step_one_day(_day_state, _day_incoming, _day_logs, _day_world_model)
     _day_logs.append(day_log)
 
-    # Check if this was the last day
     if current_day >= _day_sim_window:
-        # Build the SimulationResult so we can compute the final score
         from server.scoring import compute_simulation_score
         result = SimulationResult(
             difficulty=_day_difficulty,
@@ -268,8 +274,6 @@ def _format_day_logs(logs: list) -> str:
         if day_log.revenue_collected > 0:
             body.append(f"💰 Revenue collected: ₹{day_log.revenue_collected:,.0f}")
 
-        # Wrap the day's markdown in a styled card. The blank lines inside the
-        # div are required so Gradio's markdown renderer parses the inner block.
         card_md = "\n\n".join(body)
         cards.append(f'<div class="day-card">\n\n{card_md}\n\n</div>')
 
@@ -576,9 +580,6 @@ h1 { margin: 4px 0 8px 0 !important; font-size: 22px !important; }
 """
 
 def build_ui():
-    # Gradio 6.0 deprecated `theme` and `css` on `Blocks()` (moved to `launch()`),
-    # but this app is mounted via `mount_gradio_app` — there is no `launch()`.
-    # Injecting a <style> tag directly into the layout always works.
     with gr.Blocks(title="Cashflow Simulation") as demo:
         gr.HTML(f"<style>{css}</style>")
         with gr.Row(elem_classes="header-row"):
@@ -586,9 +587,6 @@ def build_ui():
                 gr.Markdown("# 🏢 Cashflow Simulation Engine")
             with gr.Column(scale=1, min_width=80):
                 theme_toggle = gr.Button("🌓", size="sm", elem_classes="theme-toggle-btn")
-        # JS-only toggle: flip Gradio's `.dark` class on the root element.
-        # Gradio's own CSS keys off this; our CSS does too (see light/dark
-        # rules below). Buttons stay blue regardless via CSS variable overrides.
         theme_toggle.click(
             fn=None,
             inputs=[],

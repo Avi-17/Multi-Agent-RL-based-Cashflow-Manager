@@ -53,7 +53,6 @@ class OperationsRubric(Rubric):
         overdue = day_log.overdue_invoice_count
 
         # Penalize overdue invoices heavily, but NOT the total backlog
-        # (having unpaid invoices that aren't due yet is fine)
         overdue_penalty = overdue * 15.0
         
         return (
