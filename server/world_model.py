@@ -48,84 +48,82 @@ class WorldModel:
         self.vendor_mood: Dict[str, float] = {}  # vendor_id -> mood modifier
         self.day_effects: Dict[str, Any] = {}    # per-day cache of effects
 
-    def initialize(self, scenario: Dict[str, Any], max_days: int = 10):
-        """Generate hidden events from scenario data."""
+    def initialize(self, scenario: Dict[str, Any], sim_window: int = 3):
+        """Generate hidden events from scenario data.
+
+        Amounts are scaled to the scenario's starting cash so shocks hurt the
+        score without instantly bankrupting short-window simulations.
+        """
         self.events = []
         self.triggered_log = []
         self.market_stress = random.uniform(0.0, 0.3)
         self.vendor_mood = {}
         self.day_effects = {}
 
+        starting_cash = float(scenario.get("company", {}).get("starting_cash", 10000))
+
         vendors = scenario.get("vendors", [])
         for v in vendors:
             self.vendor_mood[v["id"]] = 0.0
 
-        # --- Generate Cash Shocks ---
-        num_shocks = random.randint(4, 7)
+        # --- Cash shocks (scaled to starting cash, count scaled to window) ---
+        # Survivable but score-impacting: each shock ~8-25% of starting cash.
+        num_shocks = max(1, sim_window // 2)
         shock_types = [
-            ("Equipment Failure", -200000, -400000),
-            ("Tax Audit Penalty", -150000, -300000),
-            ("Emergency Repair", -80000, -200000),
-            ("Regulatory Fine", -100000, -250000),
-            ("Supplier Price Hike", -50000, -150000),
+            ("Equipment failure",    0.15, 0.25),
+            ("Tax audit penalty",    0.12, 0.20),
+            ("Emergency repair",     0.08, 0.15),
+            ("Regulatory fine",      0.10, 0.18),
+            ("Supplier price hike",  0.05, 0.12),
         ]
         for _ in range(num_shocks):
-            shock = random.choice(shock_types)
+            description, lo_pct, hi_pct = random.choice(shock_types)
             self.events.append(WorldEvent(
-                day=random.randint(1, max_days - 1),
+                day=random.randint(1, sim_window),
                 event_type="cash_shock",
                 severity=random.uniform(0.6, 1.0),
-                description=shock[0],
-                amount=random.uniform(shock[1], shock[2]),
-                probability=random.uniform(0.6, 0.95),
+                description=description,
+                amount=-starting_cash * random.uniform(lo_pct, hi_pct),
+                probability=random.uniform(0.5, 0.8),
             ))
 
-        # --- Generate Payment Delays ---
+        # --- Payment delays (lower hit rate; receivables already roll probability) ---
         receivables = scenario.get("initial_receivables", [])
         for rec in receivables:
-            if random.random() < 0.7:  # 70% chance any receivable gets delayed
+            if random.random() < 0.5:
                 self.events.append(WorldEvent(
-                    day=random.randint(1, max_days),
+                    day=random.randint(1, sim_window),
                     event_type="payment_delay",
                     severity=random.uniform(0.5, 0.9),
                     description=f"Customer {rec['customer_id']} payment delayed",
                     target_id=rec["id"],
-                    amount=random.randint(2, 5),  # delay in days
-                    probability=random.uniform(0.7, 1.0),
+                    amount=random.randint(1, 3),  # delay in days
+                    probability=random.uniform(0.6, 0.85),
                 ))
 
-        # --- Generate Revenue Miss ---
-        if random.random() < 0.6:
+        # --- Revenue miss (rare, raises market stress) ---
+        if random.random() < 0.4:
             self.events.append(WorldEvent(
-                day=random.randint(1, max_days),
+                day=random.randint(1, sim_window),
                 event_type="revenue_miss",
                 severity=random.uniform(0.6, 0.9),
                 description="Quarterly revenue target missed — board review triggered",
-                probability=random.uniform(0.7, 0.9),
+                probability=random.uniform(0.6, 0.85),
             ))
 
-        # --- Generate Vendor Mood Shifts ---
-        for v in vendors:
-            if random.random() < 0.6:
-                self.events.append(WorldEvent(
-                    day=random.randint(1, max_days),
-                    event_type="vendor_shift",
-                    severity=random.uniform(0.4, 0.8),
-                    description=f"Vendor {v['name']} mood shift",
-                    target_id=v["id"],
-                    amount=random.uniform(-0.3, -0.1),  # negative trust modifier
-                    probability=random.uniform(0.7, 0.9),
-                ))
+        # vendor_shift events intentionally omitted: no consumer for vendor
+        # trust deltas in current state. Re-enable when vendor_profiles is
+        # plumbed into State.
 
-        # --- Fraud anomaly (rare) ---
-        if random.random() < 0.4:
+        # --- Fraud (rare, scaled to cash) ---
+        if random.random() < 0.2:
             self.events.append(WorldEvent(
-                day=random.randint(1, max_days),
+                day=random.randint(1, sim_window),
                 event_type="fraud",
                 severity=0.9,
                 description="Suspicious transaction detected — investigation required",
-                amount=-random.uniform(200000, 500000),
-                probability=0.7,
+                amount=-starting_cash * random.uniform(0.10, 0.20),
+                probability=0.5,
             ))
 
     def update(self, day: int) -> Dict[str, Any]:

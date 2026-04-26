@@ -92,7 +92,6 @@ def generate_scenario(difficulty: str = "medium", sim_window: int = 3, seed: int
         "initial_invoices": [inv.model_dump() for inv in invoices],
         "initial_receivables": [rec.model_dump() for rec in receivables],
         "incoming_invoices": [inc.model_dump() for inc in incoming],
-        "hidden_events": []  # Keeping it for backwards compatibility if needed
     }
 
 
