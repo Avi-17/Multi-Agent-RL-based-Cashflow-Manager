@@ -286,18 +286,31 @@ Project cash inflows and provide your memo."""
     }
 
 
-def risk_agent(state, past_logs: list) -> Dict[str, Any]:
+def risk_agent(state, past_logs: list, risk_hints: Dict[str, Any] = None) -> Dict[str, Any]:
     state_text = serialize_state_minimal(state)
 
     total_debt = sum(inv.amount for inv in state.active_invoices)
     credit_util = state.credit_used / (state.credit_limit + 1.0)
+
+    # Optional partial info from the world model: market_stress in [0,1] and a
+    # qualitative upcoming_risk_level. Used as additional signal for the agent;
+    # exact event amounts/days remain hidden.
+    market_context = ""
+    if risk_hints:
+        stress = risk_hints.get("market_stress", 0.0)
+        upcoming = risk_hints.get("upcoming_risk_level", "low")
+        market_context = (
+            f"\nMARKET CONTEXT (partial info):\n"
+            f"  Market Stress: {stress:.2f} (0=calm, 1=crisis)\n"
+            f"  Upcoming Risk Level: {upcoming}\n"
+        )
 
     prompt = f"""{state_text}
 
 RISK METRICS:
   Debt-to-Cash Ratio: {total_debt / (state.cash + 1.0):.1f}
   Credit Utilization: {credit_util*100:.0f}%
-
+{market_context}
 Assess financial risk and provide your memo."""
 
     data = get_model_response(
