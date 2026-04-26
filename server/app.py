@@ -35,7 +35,6 @@ app: FastAPI = create_app(
     CashflowmanagerObservation,
     env_name="cashflowmanager",
     max_concurrent_envs=1,
-    enable_ui=True
 )
 
 
