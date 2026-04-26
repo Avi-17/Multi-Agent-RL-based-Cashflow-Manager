@@ -14,6 +14,22 @@ from models import CashflowmanagerObservation as State, DayLog
 MAX_HISTORY_DAYS = 5
 
 
+def serialize_state_minimal(state: State) -> str:
+    """One-line state header for advisor agents.
+
+    Each advisor already builds its own inline section (invoice list, receivable
+    list, risk metrics), so duplicating those in the state block wastes tokens.
+    """
+    total_debt = sum(inv.amount for inv in state.active_invoices)
+    overdue_n = len(state.overdue_invoices)
+    credit_available = state.credit_limit - state.credit_used
+    return (
+        f"=== FINANCIAL STATE (Day {state.day}) ===\n"
+        f"Cash: ₹{state.cash:,.0f} | Credit: ₹{state.credit_used:,.0f}/₹{state.credit_limit:,.0f} "
+        f"(₹{credit_available:,.0f} available) | Total Debt: ₹{total_debt:,.0f} | Overdue: {overdue_n}"
+    )
+
+
 def serialize_state(state: State) -> str:
     """Convert the current simulation state into a text block for LLM prompts."""
     lines = [
@@ -121,26 +137,35 @@ def _generate_feedback(day_log: DayLog) -> str:
     parts = []
 
     if day_log.reward < -100:
-        parts.append("⚠ CRITICAL: Massive penalty. Rethink strategy entirely.")
+        parts.append("⚠ CRITICAL: Massive penalty. You MUST pay overdue invoices immediately next turn.")
     elif day_log.reward < 0:
-        parts.append("⚠ Negative reward.")
+        parts.append("⚠ Negative reward — change strategy.")
 
     if day_log.late_fees_incurred > 0:
-        parts.append(f"Late fees hurt (₹{day_log.late_fees_incurred:,.0f}). Prioritize overdue invoices.")
+        parts.append(
+            f"Late fees: ₹{day_log.late_fees_incurred:,.0f}. "
+            f"LESSON: Pay invoices BEFORE they go overdue. Do NOT defer invoices due in 0-1 days."
+        )
+
+    if day_log.overdue_invoice_count > 0 and day_log.invoices_paid_today == 0:
+        parts.append(
+            f"You had {day_log.overdue_invoice_count} overdue invoice(s) but paid NONE. "
+            f"This compounds penalties daily. Pay them next turn."
+        )
 
     if day_log.closing_credit_used > 0 and day_log.reward < 0:
-        parts.append("Credit usage amplified the penalty. Use credit sparingly.")
+        parts.append("Credit usage increased your penalty. Avoid credit unless bankrupt.")
 
     if day_log.invoices_paid_today > 0 and day_log.reward > 0:
-        parts.append(f"Paying {day_log.invoices_paid_today} invoice(s) was rewarded.")
+        parts.append(f"✅ Paying {day_log.invoices_paid_today} invoice(s) was rewarded (+{day_log.reward:.0f}).")
 
     if day_log.revenue_collected > 0:
-        parts.append(f"Collected ₹{day_log.revenue_collected:,.0f} — good timing.")
+        parts.append(f"Collected ₹{day_log.revenue_collected:,.0f}.")
 
     if not parts:
         if day_log.reward > 50:
-            return "✅ Strong performance. Maintain this strategy."
+            return "✅ Strong performance. Keep paying invoices on time."
         else:
-            return "Neutral day. Look for optimization opportunities."
+            return "Neutral day. Pay any invoices due in 0-2 days to improve."
 
     return " ".join(parts)

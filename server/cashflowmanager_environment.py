@@ -3,17 +3,19 @@ Core Simulation Engine.
 """
 
 import random
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
 
 from models import (
-    CashflowmanagerObservation as State, 
+    CashflowmanagerObservation as State,
     Invoice, Receivable, IncomingInvoice,
     CashflowmanagerAction, DayLog, SimulationResult,
 )
 from server.data_generator import generate_scenario
 from server.agents import (
     expenditure_agent, revenue_agent, risk_agent, format_memo,
-    cfo_decide
+    cfo_decide, cfo_decide_with_metadata
 )
 from server.reward import CashflowRubric
 from server.scoring import compute_simulation_score
@@ -21,6 +23,7 @@ from server.scoring import compute_simulation_score
 
 # Initialize the Rubric system
 reward_rubric = CashflowRubric()
+CFO_CONFIDENCE_THRESHOLD = float(os.environ.get("CFO_CONFIDENCE_THRESHOLD", "0.85"))
 
 # ─────────────────────────────────────────────
 # Advisors & CFO Wrappers
@@ -46,12 +49,61 @@ def risk_advisor(state, past_logs=None):
 
 
 # ─────────────────────────────────────────────
+# Heuristic Fast Path (no API call)
+# ─────────────────────────────────────────────
+
+def _try_fast_path(state: State):
+    """
+    Attempt to generate rule-based actions without calling the LLM.
+    Returns a list of CashflowmanagerAction if the situation is simple enough,
+    or None if the LLM should handle it.
+    
+    Conditions for fast path:
+      - No overdue invoices
+      - Total unpaid amount <= cash available
+      - 3 or fewer unpaid invoices
+    """
+    unpaid = [inv for inv in state.active_invoices if inv.status != "paid"]
+    
+    if not unpaid:
+        return []  # Nothing to do
+    
+    overdue = [inv for inv in unpaid if inv.due_in < 0]
+    if overdue:
+        return None  # Complex — need LLM
+
+    total_owed = sum(inv.amount for inv in unpaid)
+    if total_owed > state.cash:
+        return None  # Not enough cash to pay everything — need LLM to prioritize
+
+    if len(unpaid) > 3:
+        return None  # Too many invoices — need LLM
+
+    # Simple case: pay invoices due soon, defer the rest
+    actions = []
+    remaining_cash = state.cash
+    for inv in sorted(unpaid, key=lambda x: x.due_in):
+        if inv.due_in <= 2 and remaining_cash >= inv.amount:
+            actions.append(CashflowmanagerAction(
+                type="pay", invoice_id=inv.id, amount=inv.amount,
+                memo=f"Fast-path: pay (due in {inv.due_in}d)"
+            ))
+            remaining_cash -= inv.amount
+        else:
+            actions.append(CashflowmanagerAction(
+                type="defer", invoice_id=inv.id, amount=0.0,
+                memo=f"Fast-path: defer (due in {inv.due_in}d)"
+            ))
+    return actions
+
+
+# ─────────────────────────────────────────────
 # Core Engine
 # ─────────────────────────────────────────────
 
 def init_simulation(
     difficulty: str = "medium",
-    sim_window: int = 7,
+    sim_window: int = 3,
     seed: int = 42,
 ) -> tuple:
     scenario = generate_scenario(difficulty=difficulty, sim_window=sim_window, seed=seed)
@@ -103,20 +155,41 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
     revenue_today = _collect_receivables(state, day, day_log)
     day_log.revenue_collected = revenue_today
 
-    day_log.advisor_memos = {
-        "Expenditure": expenditure_advisor(state, past_logs),
-        "Revenue": revenue_advisor(state, past_logs),
-        "Risk": risk_advisor(state, past_logs),
-    }
+    # ── CFO Gating Flow ──
+    # Step 1: Evaluate state complexity heuristically (NO API call)
+    day_log.advisor_memos = {}
+    fast_actions = _try_fast_path(state)
 
-    actions = cfo_decide(state, day_log.advisor_memos, past_logs)
-    day_log.actions = actions
+    if fast_actions is not None:
+        # Fast path — trivially simple day, skip ALL API calls
+        day_log.advisor_memos["Routing"] = "[FAST_PATH] Simple state — rule-based actions, no LLM needed."
+        day_log.actions = fast_actions
+    else:
+        # Complex day — run the three advisors in parallel on separate API keys
+        # (see EXPENDITURE/REVENUE/RISK_KEY_INDEX in agents.py). Each advisor
+        # hits its own TPM bucket, so concurrency doesn't cause rate-limit
+        # contention. CFO runs sequentially after, on the Risk key.
+        day_log.advisor_memos["Routing"] = "[FULL_PATH] Complex state — consulting advisors (parallel) + CFO."
 
-    paid_today = _apply_actions(state, actions, day_log)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {
+                "Expenditure": executor.submit(expenditure_advisor, state, past_logs),
+                "Revenue": executor.submit(revenue_advisor, state, past_logs),
+                "Risk": executor.submit(risk_advisor, state, past_logs),
+            }
+            for name, future in futures.items():
+                try:
+                    day_log.advisor_memos[name] = future.result()
+                except Exception as e:
+                    day_log.advisor_memos[name] = f"[ERROR] {name} advisor failed: {e}"
+
+        day_log.actions = cfo_decide(state, day_log.advisor_memos, past_logs)
+
+    paid_today = _apply_actions(state, day_log.actions or [], day_log)
     day_log.invoices_paid_today = paid_today
 
     fees, interest = _apply_daily_charges(state, day_log)
-    day_log.late_fees_incurred = fees
+    day_log.late_fees_incurred += fees
     day_log.interest_incurred = interest
 
     obs = {
@@ -137,7 +210,7 @@ def step_one_day(state: State, incoming_invoices: List[IncomingInvoice], past_lo
 
 def run_simulation(
     difficulty: str = "medium",
-    sim_window: int = 7,
+    sim_window: int = 3,
     seed: int = 42,
 ) -> SimulationResult:
     state, incoming_invoices = init_simulation(difficulty, sim_window, seed)
@@ -216,10 +289,12 @@ def _age_invoices(state: State, day_log: DayLog):
 
         if inv.due_in < 0 and inv.status != "overdue":
             inv.status = "overdue"
+            inv.amount += inv.late_fee
+            day_log.late_fees_incurred += inv.late_fee
             if inv not in state.overdue_invoices:
                 state.overdue_invoices.append(inv)
             day_log.events.append(
-                f"⏰ Invoice {inv.id} from {inv.vendor_id} is now OVERDUE! (₹{inv.amount:,.0f})"
+                f"⏰ Invoice {inv.id} from {inv.vendor_id} is now OVERDUE! (₹{inv.amount:,.0f} incl. fee)"
             )
 
 
@@ -239,6 +314,8 @@ def _collect_receivables(state: State, day: int, day_log: DayLog) -> float:
                 day_log.events.append(
                     f"❌ Payment from {rec.customer_id} (₹{rec.amount:,.0f}) FAILED to arrive"
                 )
+                rec.expected_in += 1
+                remaining.append(rec)
         else:
             remaining.append(rec)
 
@@ -252,8 +329,9 @@ def _apply_actions(state: State, actions: List[CashflowmanagerAction], day_log: 
     for action in actions:
         if action.type == "pay" and action.invoice_id:
             inv = _find_invoice(state, action.invoice_id)
-            if inv and inv.status != "paid" and action.amount:
-                pay_amount = min(action.amount, inv.amount, state.cash)
+            if inv and inv.status != "paid":
+                amount_to_pay = action.amount if action.amount else inv.amount
+                pay_amount = min(amount_to_pay, inv.amount, state.cash)
                 if pay_amount <= 0:
                     continue
 
@@ -272,8 +350,9 @@ def _apply_actions(state: State, actions: List[CashflowmanagerAction], day_log: 
 
         elif action.type == "partial" and action.invoice_id:
             inv = _find_invoice(state, action.invoice_id)
-            if inv and inv.status != "paid" and action.amount:
-                pay_amount = min(action.amount, inv.amount, state.cash)
+            if inv and inv.status != "paid":
+                amount_to_pay = action.amount if action.amount else inv.amount
+                pay_amount = min(amount_to_pay, inv.amount, state.cash)
                 if pay_amount <= 0:
                     continue
 
@@ -322,10 +401,6 @@ def _apply_daily_charges(state: State, day_log: DayLog) -> tuple:
         interest = round(inv.amount * inv.interest, 2)
         inv.amount += interest
         total_interest += interest
-
-        if inv.due_in < 0:
-            inv.amount += inv.late_fee
-            total_fees += inv.late_fee
 
     return total_fees, total_interest
 

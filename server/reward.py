@@ -26,22 +26,24 @@ class CreditUtilizationRubric(Rubric):
     def forward(self, action: Any, obs: Dict[str, Any]) -> float:
         state = obs["state"]
         day_log = obs["day_log"]
-        # Credit limit is tracked in the state
+        # Credit utilization
         utilization = day_log.closing_credit_used / (state.credit_limit + 1.0)
-        # Scaled up from 50 to 500 to severely punish maxing out credit just to get invoice bonuses
         return -(utilization ** 2) * 500.0
 
 class LiquidityRubric(Rubric):
-    """Rewards holding cash, but penalizes it if there are late fees."""
+    """Rewards paying bills on time. Small cash-holding bonus when no fees."""
     def forward(self, action: Any, obs: Dict[str, Any]) -> float:
         day_log = obs["day_log"]
-        cash = day_log.closing_cash
         fees = day_log.late_fees_incurred
+        paid = day_log.invoices_paid_today
         
-        return 0.001 * cash if fees == 0 else -0.001 * cash
+        # Reward paying invoices; small bonus for zero late fees
+        if fees == 0:
+            return 20.0 + (paid * 15.0)
+        return -(fees * 0.5)
 
 class OperationsRubric(Rubric):
-    """Evaluates the day-to-day operations: fees, interest, and backlog."""
+    """Evaluates the day-to-day operations: fees, interest, and invoice clearance."""
     def forward(self, action: Any, obs: Dict[str, Any]) -> float:
         day_log = obs["day_log"]
         
@@ -49,17 +51,16 @@ class OperationsRubric(Rubric):
         interest = day_log.interest_incurred
         paid = day_log.invoices_paid_today
         overdue = day_log.overdue_invoice_count
-        active = day_log.active_invoice_count
 
-        overdue_penalty = overdue * 10.0
-        backlog_penalty = active * 2.0
+        # Penalize overdue invoices heavily, but NOT the total backlog
+        # (having unpaid invoices that aren't due yet is fine)
+        overdue_penalty = overdue * 15.0
         
         return (
             - 2.0 * fees
             - 1.5 * interest
             - overdue_penalty
-            - backlog_penalty
-            + 100.0 * paid
+            + 120.0 * paid
         )
 
 class CashflowRubric(Rubric):

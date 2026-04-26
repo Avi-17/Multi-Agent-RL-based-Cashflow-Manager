@@ -36,20 +36,59 @@ API_KEY = os.environ.get("GROQ_API_KEY") or os.environ.get("API_KEY")
 # Global instances for local model
 _local_model = None
 _local_tokenizer = None
-_client = None
+# Per-key-index OpenAI client cache: {key_index: client}
+_clients: dict = {}
 
-def get_client():
-    """Lazy-load OpenAI client for API mode."""
-    global _client
-    if _client is not None:
-        return _client
+
+def _parse_api_keys() -> list:
+    """Parse GROQ_API_KEYS into a list of bare key strings.
+
+    Robust to common .env formats:
+      - bare CSV:   k1,k2,k3
+      - outer-quoted: "k1,k2,k3"
+      - individually quoted: "k1","k2","k3"  (dotenv may keep quotes literal)
+    Falls back to [GROQ_API_KEY] if GROQ_API_KEYS is unset or empty.
+    """
+    raw = os.environ.get("GROQ_API_KEYS", "")
+    keys = []
+    if raw:
+        for piece in raw.split(","):
+            cleaned = piece.strip().strip('"').strip("'").strip()
+            if cleaned:
+                keys.append(cleaned)
+    if not keys and API_KEY:
+        keys = [API_KEY]
+    return keys
+
+
+_keys_logged = False
+
+
+def get_client(key_index: int = 0):
+    """Lazy-load an OpenAI client for the given API key slot.
+
+    If key_index is out of bounds (e.g. user only configured 1 key but agents.py
+    asks for index 2), falls back to index 0 — so single-key setups still work.
+    """
+    global _keys_logged
+    if key_index in _clients:
+        return _clients[key_index]
     if OpenAI is None:
         return None
-    if not API_KEY and not USE_LOCAL_HF:
+    keys = _parse_api_keys()
+    if not keys and not USE_LOCAL_HF:
         return None
+    if not _keys_logged:
+        # One-time confirmation of how many keys we found, so the user can
+        # verify their .env was parsed correctly.
+        masked = [f"{k[:8]}...{k[-4:]}" for k in keys]
+        print(f"[Client] Loaded {len(keys)} API key(s): {masked}")
+        _keys_logged = True
+    actual_index = key_index if 0 <= key_index < len(keys) else 0
     try:
-        _client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-        return _client
+        client = OpenAI(base_url=API_BASE_URL, api_key=keys[actual_index])
+        _clients[key_index] = client
+        return client
     except Exception:
         return None
 
@@ -168,8 +207,19 @@ def _extract_first_json(text: str):
     return None
 
 
-def get_model_response(prompt, system_prompt="You are a helpful assistant.", response_format="json", max_tokens=256):
-    """Unified interface to get response from either API or Local HF model."""
+def get_model_response(
+    prompt,
+    system_prompt="You are a helpful assistant.",
+    response_format="json",
+    max_tokens=256,
+    model_name=None,
+    key_index: int = 0,
+):
+    """Unified interface to get response from either API or Local HF model.
+
+    key_index selects which Groq API key to use (when GROQ_API_KEYS has
+    multiple keys configured). Out-of-range indices fall back to key 0.
+    """
     
     
     if USE_LOCAL_HF:
@@ -196,9 +246,15 @@ def get_model_response(prompt, system_prompt="You are a helpful assistant.", res
             return response_text
             
     # API Mode (Groq/OpenAI) with retry for rate limits
-    client = get_client()
+    client = get_client(key_index)
     if client:
-        max_retries = 3
+        max_retries = int(os.environ.get("LLM_MAX_RETRIES", "5"))
+        request_timeout_s = float(os.environ.get("LLM_TIMEOUT_SECONDS", "20"))
+        target_model = model_name or MODEL_NAME
+
+        # Tag logs with the calling agent so we can tell which one is failing.
+        agent_tag = (system_prompt or "")[:40].replace("\n", " ").strip() or "unknown"
+
         for attempt in range(max_retries):
             try:
                 resp = client.chat.completions.create(
@@ -206,25 +262,55 @@ def get_model_response(prompt, system_prompt="You are a helpful assistant.", res
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    model=MODEL_NAME,
+                    model=target_model,
+                    response_format={"type": "json_object"} if response_format == "json" else None,
                     temperature=0.2,
                     max_tokens=max_tokens,
+                    timeout=request_timeout_s,
                 )
                 content = resp.choices[0].message.content
                 if response_format == "json":
                     content = _sanitize_json_text(content)
-                    result = _extract_first_json(content)
-                    if result is not None:
-                        return result
+                    try:
+                        return json.loads(content)
+                    except json.JSONDecodeError:
+                        # Fallback: try extracting first JSON object
+                        result = _extract_first_json(content)
+                        if result is not None:
+                            return result
+                        print(
+                            f"[Client] FAIL_REASON=json_parse agent='{agent_tag}' "
+                            f"model={target_model} key={key_index} raw(300)={content[:300]!r}"
+                        )
+                        return None
                 return content
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "rate_limit" in error_str:
-                    wait = (attempt + 1) * 4  # 4s, 8s, 12s
-                    print(f"[Client] Rate limited. Waiting {wait}s before retry ({attempt+1}/{max_retries})...")
+                    import re
+                    match = re.search(r"Please try again in ([0-9.]+)s", error_str)
+                    if match:
+                        wait = float(match.group(1)) + 0.1
+                    else:
+                        wait = float(attempt + 1)  # 1s, 2s, 3s...
+
+                    print(
+                        f"[Client] rate_limited agent='{agent_tag}' model={target_model} "
+                        f"key={key_index} attempt={attempt + 1}/{max_retries} waiting={wait:.1f}s"
+                    )
                     _time.sleep(wait)
                     continue
-                print(f"[Client] API Error: {e}")
-                break
-    
+                print(
+                    f"[Client] FAIL_REASON=api_error agent='{agent_tag}' "
+                    f"model={target_model} key={key_index} "
+                    f"attempt={attempt + 1}/{max_retries} err={e}"
+                )
+                return None
+
+        # Loop exited without returning -> all retries hit rate limits.
+        print(
+            f"[Client] FAIL_REASON=rate_limit_exhausted agent='{agent_tag}' "
+            f"model={target_model} key={key_index} attempts={max_retries}"
+        )
+
     return None
